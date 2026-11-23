@@ -1,0 +1,23 @@
+name: Trampware source package
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate bundle contents
+        run: |
+          test -f trampware_apex_ui.html
+          test -f plugin_src/trampware/Makefile
+          test -f plugin_src/trampware/source/main.c
+          test -f plugin_src/trampware/source/render.c
+      - name: Package source and UI
+        run: zip -r Trampware-source-ui.zip . -x '.git/*'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Trampware-source-ui
+          path: Trampware-source-ui.zip
