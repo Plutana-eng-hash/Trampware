@@ -9,8 +9,10 @@ Black / white in-game overlay menu for GoldHEN (`trampware.prx`).
 Tabs: Visuals (opacity, scale, accent, compact layout), HUD (status panel with FPS, crosshair, HUD scale),
 Controls (block game input while open, allow/deny vibration, navigation speed, button hints), System (logging, safe mode, reset, about).
 
-The menu is software-rendered (`source/render.c`, no SDK dependencies) and composited onto the game's video-out
-buffer from the `sceVideoOutSubmitFlip` hook. Only **linear** A8R8G8B8 / A8B8G8R8 buffers are drawn while
+The menu is software-rendered (`source/render.c`, no SDK dependencies) on a background render thread and composited
+onto the game's video-out buffers by a background draw thread. Nothing heavy runs on the game or controller threads, so
+L3 + R3 opens/closes instantly. The draw thread watches a few sample pixels per buffer and puts the menu / watermark
+back as soon as the game repaints the frame, so they no longer flicker. Only **linear** A8R8G8B8 / A8B8G8R8 buffers are drawn while
 *Draw on tiled games* is enabled.
 
 Install: copy `trampware.prx` to `/data/GoldHEN/plugins/` and add it to `/data/GoldHEN/plugins.ini`.
