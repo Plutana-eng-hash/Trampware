@@ -11,9 +11,11 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdbool.h>
 
 #include <Common.h>
+#include <Patcher.h>
 #include <orbis/VideoOut.h>
 #include "plugin_common.h"
 #include "pad.h"
@@ -40,6 +42,14 @@ HOOK_INIT(scePadReadState);
 HOOK_INIT(scePadSetVibration);
 HOOK_INIT(sceVideoOutRegisterBuffers);
 HOOK_INIT(sceVideoOutSubmitFlip);
+
+// The stock scePadRead / scePadReadState are tiny stubs that tail-call scePadReadExt / scePadReadStateExt.
+// Their first bytes are not safe to copy into a hook trampoline, so calling the "original" through
+// HOOK_CONTINUE jumps into garbage and crashes the game on the first controller read.
+// Same approach as gamepad_helper: patch the Ext functions and call them directly instead.
+static Patcher* g_padReadExtPatcher;
+static Patcher* g_padReadStateExtPatcher;
+static volatile bool g_ready;   // hooks only act after plugin_load finished initialising
 
 // Layout of the leading fields of OrbisVideoOutBufferAttribute
 typedef struct { s32 format; s32 tilingMode; s32 aspect; u32 width; u32 height; u32 pitch; } FbAttr;
@@ -230,19 +240,19 @@ static void process_pad(ScePadData* data, int count) {
 }
 
 s32 scePadRead_hook(s32 handle, ScePadData* data, s32 num) {
-    s32 ret = HOOK_CONTINUE(scePadRead, s32 (*)(s32, ScePadData*, s32), handle, data, num);
-    if (ret > 0) process_pad(data, ret);
+    s32 ret = scePadReadExt(handle, data, num);
+    if (g_ready && data && ret > 0) process_pad(data, ret);
     return ret;
 }
 
 s32 scePadReadState_hook(s32 handle, ScePadData* data) {
-    s32 ret = HOOK_CONTINUE(scePadReadState, s32 (*)(s32, ScePadData*), handle, data);
-    if (ret == 0) process_pad(data, 1);
+    s32 ret = scePadReadStateExt(handle, data);
+    if (g_ready && data && ret == 0) process_pad(data, 1);
     return ret;
 }
 
 s32 scePadSetVibration_hook(s32 handle, const ScePadVibrationParam* param) {
-    if (!OPT(TW_TAB_CONTROLS, C_VIBRATION).v) return 0;
+    if (g_ready && !OPT(TW_TAB_CONTROLS, C_VIBRATION).v) return 0;
     return HOOK_CONTINUE(scePadSetVibration, s32 (*)(s32, const ScePadVibrationParam*), handle, param);
 }
 
@@ -341,7 +351,7 @@ static void draw_overlay(void* fbp) {
 s32 sceVideoOutRegisterBuffers_hook(s32 handle, s32 startIndex, void* const* addresses, s32 bufferNum, const void* attribute) {
     s32 ret = HOOK_CONTINUE(sceVideoOutRegisterBuffers, s32 (*)(s32, s32, void* const*, s32, const void*),
                             handle, startIndex, addresses, bufferNum, attribute);
-    if (ret >= 0 && attribute && addresses) {
+    if (g_ready && ret >= 0 && attribute && addresses && startIndex >= 0 && bufferNum > 0) {
         memcpy(&g_fbAttr, attribute, sizeof(FbAttr));
         for (int i = 0; i < bufferNum; i++)
             if (startIndex + i >= 0 && startIndex + i < MAX_FB) g_fb[startIndex + i].addr = addresses[i];
@@ -353,7 +363,7 @@ s32 sceVideoOutRegisterBuffers_hook(s32 handle, s32 startIndex, void* const* add
 }
 
 s32 sceVideoOutSubmitFlip_hook(s32 handle, s32 bufferIndex, u32 flipMode, s64 flipArg) {
-    if (g_fbKnown && bufferIndex >= 0 && bufferIndex < MAX_FB && g_fb[bufferIndex].addr) {
+    if (g_ready && g_fbKnown && bufferIndex >= 0 && bufferIndex < MAX_FB && g_fb[bufferIndex].addr) {
         const bool fmtOk = (g_fbAttr.format == FB_FMT_A8R8G8B8 || g_fbAttr.format == FB_FMT_A8B8G8R8);
         const bool linear = (g_fbAttr.tilingMode == FB_TILING_LINEAR);
         const bool safe = OPT(TW_TAB_SYSTEM, S_SAFE).v != 0;
@@ -379,13 +389,28 @@ s32 attr_public plugin_load(s32 argc, const char* argv[]) {
     load_config();
     sync_look();
 
+    // libScePad may not be loaded yet when the plugin starts. libSceVideoOut is always loaded by the game
+    // (and loading it a second time is unnecessary), so only the pad library is loaded here.
     char module[256];
     int h = 0;
     snprintf(module, sizeof(module), "/%s/common/lib/%s", sceKernelGetFsSandboxRandomWord(), "libScePad.sprx");
     sys_dynlib_load_prx(module, &h);
-    snprintf(module, sizeof(module), "/%s/common/lib/%s", sceKernelGetFsSandboxRandomWord(), "libSceVideoOut.sprx");
-    sys_dynlib_load_prx(module, &h);
 
+    g_padReadExtPatcher = (Patcher*)malloc(sizeof(Patcher));
+    g_padReadStateExtPatcher = (Patcher*)malloc(sizeof(Patcher));
+    if (!g_padReadExtPatcher || !g_padReadStateExtPatcher) {
+        final_printf("[trampware] out of memory\n");
+        return -1;
+    }
+    Patcher_Construct(g_padReadExtPatcher);
+    Patcher_Construct(g_padReadStateExtPatcher);
+
+    uint8_t xor_ecx_ecx[5] = {0x31, 0xC9, 0x90, 0x90, 0x90};
+    Patcher_Install_Patch(g_padReadExtPatcher, (uint64_t)scePadReadExt, xor_ecx_ecx, sizeof(xor_ecx_ecx));
+    uint8_t xor_edx_edx[5] = {0x31, 0xD2, 0x90, 0x90, 0x90};
+    Patcher_Install_Patch(g_padReadStateExtPatcher, (uint64_t)scePadReadStateExt, xor_edx_edx, sizeof(xor_edx_edx));
+
+    g_ready = true;
     HOOK32(scePadRead);
     HOOK32(scePadReadState);
     HOOK32(scePadSetVibration);
@@ -398,6 +423,7 @@ s32 attr_public plugin_load(s32 argc, const char* argv[]) {
 
 s32 attr_public plugin_unload(s32 argc, const char* argv[]) {
     final_printf("[GoldHEN] <%s\\Ver.0x%08x> %s\n", g_pluginName, g_pluginVersion, __func__);
+    g_ready = false;
     UNHOOK(scePadRead);
     UNHOOK(scePadReadState);
     UNHOOK(scePadSetVibration);
