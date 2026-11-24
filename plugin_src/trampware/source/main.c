@@ -20,6 +20,7 @@
 #include "plugin_common.h"
 #include "pad.h"
 #include "render.h"
+#include "tile.h"
 
 attr_public const char* g_pluginName = "trampware";
 attr_public const char* g_pluginDesc = "Trampware black/white overlay menu";
@@ -285,14 +286,12 @@ s32 scePadSetVibration_hook(s32 handle, const ScePadVibrationParam* param) {
 }
 
 // ------------------------------------------------------------------ compositing
-// Pixel index inside the framebuffer. Linear: row-major. Tiled (experimental): 8x8 micro tiles, row-major tile order,
-// pixel order inside a tile = x0 x1 y0 x2 y1 y2 (GCN display micro-tiling, 32bpp). Macro/bank swizzle is NOT applied yet,
-// so on 2D-tiled games the menu appears as shuffled 8x8 blocks - which shows the real macro layout.
+// Pixel index inside the framebuffer. Linear: row-major. Tiled: PS4 2D-thin display tiling, see tile.h.
 static bool g_tiledDraw;
+static unsigned g_macroPitch = 15;
 static inline size_t fb_index(int x, int y, int pitch) {
     if (!g_tiledDraw) return (size_t)y * pitch + x;
-    unsigned m = (x & 1) | (((x >> 1) & 1) << 1) | ((y & 1) << 2) | (((x >> 2) & 1) << 3) | (((y >> 1) & 1) << 4) | (((y >> 2) & 1) << 5);
-    return ((size_t)(y >> 3) * (size_t)(pitch >> 3) + (size_t)(x >> 3)) * 64 + m;
+    return tw_tiled_index((unsigned)x, (unsigned)y, g_macroPitch);
 }
 
 static void blit(const TwCanvas* c, void* fbp, int fbPitch, int fbW, int fbH, int x0, int y0, int globalA, bool swapRB) {
@@ -400,33 +399,18 @@ s32 sceVideoOutRegisterBuffers_hook(s32 handle, s32 startIndex, void* const* add
     return ret;
 }
 
-// ---- TILE PROBE v2 (temporary) ---------------------------------------------------------
-// Macro tiles are 128x64 px = 128 micro tiles (8x8 px, 256 bytes). Every row of macro tiles shows ONE bit of the micro
-// tile number (index inside its macro tile) as white/black squares: row 0 = bit 0, row 1 = bit 1 ... row 6 = bit 6, then it repeats.
-// A photo of the screen therefore tells exactly which memory tile sits at which position inside a macro tile.
-static void draw_probe(void* fbp) {
-    const size_t total = (size_t)g_fbAttr.pitch * g_fbAttr.height;
-    const u32 perRow = g_fbAttr.pitch / 128u ? g_fbAttr.pitch / 128u : 1u;   // macro tiles per row of macro tiles
-    u32* p = (u32*)fbp;
-    for (size_t i = 0; i < total; i++) {
-        u32 tile = (u32)(i >> 6);
-        u32 kk = tile & 127u;
-        u32 mrow = (tile >> 7) / perRow;
-        p[i] = ((kk >> (mrow % 7u)) & 1u) ? 0xFFFFFFFFu : 0xFF000000u;
-    }
-}
-
 static void overlay_on(s32 bufferIndex) {
     if (g_ready && g_fbKnown && bufferIndex >= 0 && bufferIndex < MAX_FB && g_fb[bufferIndex].addr) {
         const bool fmtOk = (g_fbAttr.format == FB_FMT_A8R8G8B8 || g_fbAttr.format == FB_FMT_A8B8G8R8);
         const bool linear = (g_fbAttr.tilingMode == FB_TILING_LINEAR);
         const bool tiledOn = OPT(TW_TAB_SYSTEM, S_TILED).v != 0;
         g_tiledDraw = !linear;
-        const bool dimsOk = linear || ((g_fbAttr.pitch % 8) == 0 && (g_fbAttr.height % 8) == 0 && g_fbAttr.pitch >= g_fbAttr.width);
+        const u32 pitch = g_fbAttr.pitch ? g_fbAttr.pitch : g_fbAttr.width;
+        g_macroPitch = (pitch + 127) / 128;
+        const bool dimsOk = linear || (pitch >= g_fbAttr.width);
         if (fmtOk && dimsOk && (linear || tiledOn)) {
             g_overlayOk = true;
-            if (!linear) { if (g_open) draw_probe(g_fb[bufferIndex].addr); }   // tiled: probe pattern until the layout is mapped
-            else draw_overlay(g_fb[bufferIndex].addr);
+            draw_overlay(g_fb[bufferIndex].addr);
         } else {
             g_overlayOk = false;
         }

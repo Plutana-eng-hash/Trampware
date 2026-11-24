@@ -15,7 +15,9 @@ buffer from the `sceVideoOutSubmitFlip` hook. Only **linear** A8R8G8B8 / A8B8G8R
 
 Install: copy `trampware.prx` to `/data/GoldHEN/plugins/` and add it to `/data/GoldHEN/plugins.ini`.
 
-## Tiled games (experimental)
-Most games use tiled framebuffers. **System > Draw on tiled games** (on by default) draws the menu on them using an
-8x8 micro-tile layout. If the menu looks like shuffled blocks, the game also uses macro tiling - send a photo so the layout can be mapped.
+## Tiled games
+Most games use tiled framebuffers. The plugin draws on them with the PS4 2D-thin display tiling (`source/tile.h`):
+128x64 px macro tiles, 8 pipes / 16 banks, 8x8 micro tiles. The bit layout was decoded from a photo of the old
+probe pattern taken on real hardware. **System > Draw on tiled games** (on by default) switches this on; turn it off
+if a game ever shows glitched blocks. `test/tile_test.c` checks the address mapping on the host.
 The plugin shows one notification when it loads and no other notifications.
