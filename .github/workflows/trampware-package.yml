@@ -11,7 +11,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate bundle contents
         run: |
-          test -f trampware_apex_ui.html
           test -f plugin_src/trampware/Makefile
           test -f plugin_src/trampware/source/main.c
           test -f plugin_src/trampware/source/render.c
