@@ -91,21 +91,20 @@ static u64 g_toastUntil;
 
 // ---- layers: each one has a front canvas (shown) and a back canvas (being rendered); swapped under g_cvLock
 enum { L_STATUS, L_CROSS, L_PANEL, L_TOAST, L_COUNT };
-#define MAX_MARKS 4
 typedef struct {
     TwCanvas cv[2];
     int front;
     bool visible;
     int x, y, alpha;
-    int nm, mx[MAX_MARKS], my[MAX_MARKS];   // opaque sample pixels (canvas coordinates) used to detect "overlay was wiped"
+    // Pre-converted pixel list for the front canvas: framebuffer dword index + final colour. Drawing is then a plain
+    // store per pixel (no blending, no reads), so it can be repeated every millisecond without any side effects.
+    u32 *idx, *col;
+    int n, cap;
+    u32 geo;            // framebuffer geometry version the list was built for
 } Layer;
 static Layer g_layer[L_COUNT];
-static volatile u32 g_ver = 1;              // bumped whenever what has to be on screen changes
 
-// Per framebuffer: which version of the overlay it holds + the exact pixels we wrote at the sample points
-#define MAX_BMARK 16
-typedef struct { u32 ver; u64 t; int n; int x[MAX_BMARK], y[MAX_BMARK]; u32 val[MAX_BMARK]; } BufState;
-static BufState g_bs[MAX_FB];
+static volatile u32 g_geo = 1;              // bumped when the framebuffers are (re)registered
 static volatile s32 g_curIdx = -1;          // buffer submitted last (still being rendered / about to be shown)
 
 static OrbisPthread g_thRender, g_thDraw;
@@ -319,32 +318,6 @@ static inline size_t fb_index(int x, int y, int pitch) {
     return tw_tiled_index((unsigned)x, (unsigned)y, g_macroPitch);
 }
 
-static void blit(const TwCanvas* c, void* fbp, int fbPitch, int fbW, int fbH, int x0, int y0, int globalA, bool swapRB) {
-    for (int j = 0; j < c->h; j++) {
-        int y = y0 + j;
-        if (y < 0 || y >= fbH) continue;
-        const u32* src = c->px + (size_t)j * c->w;
-        for (int i = 0; i < c->w; i++) {
-            u32 s = src[i];
-            if (!(s >> 24)) continue;   // fully transparent
-            int x = x0 + i;
-            if (x < 0 || x >= fbW) continue;
-            u32 a = ((s >> 24) * globalA) / 255;
-            if (!a) continue;
-            u32 sr = (s >> 16) & 255, sg = (s >> 8) & 255, sb = s & 255;
-            if (swapRB) { u32 t = sr; sr = sb; sb = t; }
-            u32* dp = (u32*)fbp + fb_index(x, y, fbPitch);
-            if (a >= 255) { *dp = 0xFF000000u | (sr << 16) | (sg << 8) | sb; continue; }
-            u32 d = *dp;
-            u32 dr = (d >> 16) & 255, dg = (d >> 8) & 255, db = d & 255;
-            dr += ((int)(sr - dr) * (int)a) / 255;
-            dg += ((int)(sg - dg) * (int)a) / 255;
-            db += ((int)(sb - db) * (int)a) / 255;
-            *dp = 0xFF000000u | (dr << 16) | (dg << 8) | db;
-        }
-    }
-}
-
 static bool ensure(TwCanvas* c, int w, int h) {
     if (c->px && c->w == w && c->h == h) return true;
     tw_canvas_free(c);
@@ -366,88 +339,86 @@ static bool fb_supported(void) {
 }
 
 // ---- layer publishing (render thread -> draw thread)
-// Pick a few fully opaque pixels of the front canvas. If the game later repaints the buffer, these pixels no
-// longer hold what we wrote there, which is how the draw thread knows the overlay has to be put back.
-static void pick_marks(Layer* L) {
+// Convert the front canvas to a flat list of (framebuffer index, colour). Pixels that are mostly transparent are skipped,
+// the rest are stored fully opaque, so the menu and watermark are always drawn at full strength.
+static void layer_build(Layer* L) {
     const TwCanvas* c = &L->cv[L->front];
-    static const int fx[5] = {15, 85, 15, 85, 50}, fy[5] = {15, 15, 85, 85, 50};
-    L->nm = 0;
+    const int W = (int)g_fbAttr.width, H = (int)g_fbAttr.height;
+    const int pitch = g_fbAttr.pitch ? (int)g_fbAttr.pitch : W;
+    const bool swapRB = (g_fbAttr.format == FB_FMT_A8B8G8R8);
+    L->n = 0;
+    L->geo = g_geo;
     if (!c->px) return;
-    for (int k = 0; k < 5 && L->nm < MAX_MARKS; k++) {
-        int x = c->w * fx[k] / 100, y = c->h * fy[k] / 100;
-        if ((c->px[(size_t)y * c->w + x] >> 24) == 255) { L->mx[L->nm] = x; L->my[L->nm] = y; L->nm++; }
+    const int need = c->w * c->h;
+    if (need > L->cap) {
+        free(L->idx); free(L->col);
+        L->idx = (u32*)malloc((size_t)need * 4);
+        L->col = (u32*)malloc((size_t)need * 4);
+        L->cap = (L->idx && L->col) ? need : 0;
+        if (!L->cap) return;
     }
+    int n = 0;
+    for (int j = 0; j < c->h; j++) {
+        const int y = L->y + j;
+        if (y < 0 || y >= H) continue;
+        for (int i = 0; i < c->w; i++) {
+            const u32 s = c->px[(size_t)j * c->w + i];
+            if ((s >> 24) < 96) continue;
+            const int x = L->x + i;
+            if (x < 0 || x >= W) continue;
+            u32 r = (s >> 16) & 255, g = (s >> 8) & 255, b = s & 255;
+            if (swapRB) { u32 t = r; r = b; b = t; }
+            L->idx[n] = (u32)fb_index(x, y, pitch);
+            L->col[n] = 0xFF000000u | (r << 16) | (g << 8) | b;
+            n++;
+        }
+    }
+    L->n = n;
 }
 
 // Make `li` show the given state. swap = the back canvas was just rendered and becomes the front one.
-static void layer_publish(int li, bool vis, int x, int y, int alpha, bool swap) {
+static void layer_publish(int li, bool vis, int x, int y, bool swap) {
     Layer* L = &g_layer[li];
-    if (!swap && L->visible == vis && L->x == x && L->y == y && L->alpha == alpha) return;
+    if (!swap && L->visible == vis && L->x == x && L->y == y && L->geo == g_geo) return;
+    if (!fb_supported()) return;    // primes the tiling globals used by layer_build
     cvlock();
-    if (swap) { L->front ^= 1; pick_marks(L); }
+    if (swap) L->front ^= 1;
     L->visible = vis && L->cv[L->front].px != NULL;
-    L->x = x; L->y = y; L->alpha = alpha;
-    g_ver++;
+    L->x = x; L->y = y;
+    if (L->visible) layer_build(L);
     cvunlock();
 }
 
-// ---- drawing onto one framebuffer (caller holds g_cvLock and has called fb_supported())
-static inline u32 fb_get(const void* fbp, int pitch, int x, int y) { return ((const u32*)fbp)[fb_index(x, y, pitch)]; }
-
-static bool buffer_ok(int idx) {
-    const BufState* s = &g_bs[idx];
-    if (s->ver != g_ver) return false;
-    const int pitch = g_fbAttr.pitch ? (int)g_fbAttr.pitch : (int)g_fbAttr.width;
-    for (int k = 0; k < s->n; k++)
-        if (fb_get(g_fb[idx].addr, pitch, s->x[k], s->y[k]) != s->val[k]) return false;
-    return true;
-}
-
+// ---- drawing onto one framebuffer
 static void draw_buffer(int idx) {
-    const int W = (int)g_fbAttr.width, H = (int)g_fbAttr.height;
-    const int pitch = g_fbAttr.pitch ? (int)g_fbAttr.pitch : W;
-    const bool swap = (g_fbAttr.format == FB_FMT_A8B8G8R8);
-    void* fbp = g_fb[idx].addr;
-    BufState* s = &g_bs[idx];
-    s->ver = g_ver;
-    s->n = 0;
+    u32* fbp = (u32*)g_fb[idx].addr;
     for (int li = 0; li < L_COUNT; li++) {
         const Layer* L = &g_layer[li];
-        const TwCanvas* c = &L->cv[L->front];
-        if (!L->visible || !c->px) continue;
-        blit(c, fbp, pitch, W, H, L->x, L->y, L->alpha, swap);
-        for (int k = 0; k < L->nm && s->n < MAX_BMARK; k++) {
-            int x = L->x + L->mx[k], y = L->y + L->my[k];
-            if (x < 0 || y < 0 || x >= W || y >= H) continue;
-            s->x[s->n] = x; s->y[s->n] = y; s->val[s->n] = fb_get(fbp, pitch, x, y);
-            s->n++;
-        }
+        if (!L->visible || L->geo != g_geo) continue;
+        const u32 *ix = L->idx, *cl = L->col;
+        for (int k = 0, n = L->n; k < n; k++) fbp[ix[k]] = cl[k];
     }
 }
 
-// Put the overlay on buffer idx if it is missing (never drawn, wiped by the game, or out of date).
 static void service_buffer(int idx) {
     if (idx < 0 || idx >= MAX_FB || !g_fb[idx].addr || !fb_supported()) return;
     cvlock();
-    if (!buffer_ok(idx)) {
-        BufState* s = &g_bs[idx];
-        const u64 t = now_ms();
-        // a repaint of the same version may be redrawn quickly, but not in a tight loop
-        if (s->ver != g_ver || t - s->t >= 3) { draw_buffer(idx); s->t = t; }
-    }
+    draw_buffer(idx);
     cvunlock();
 }
 
-// Draw thread: keeps the overlay on the frame that is on screen and the one about to be shown. The game renders a
-// buffer from scratch every few frames, so whenever it wipes ours this puts the overlay back within about a millisecond.
+// Draw thread: the game repaints every buffer from scratch every frame and we cannot tell when the GPU is done with one,
+// so the overlay is simply stamped onto every buffer over and over (a few hundred times a second). The stamp is a plain
+// store of the same pixels, so repeating it is free of side effects, and whichever buffer is on screen always has it.
 static void* draw_thread(void* arg) {
     (void)arg;
     while (g_run) {
-        sceKernelUsleep(1000);
-        if (!g_ready || !g_fbKnown) continue;
-        s32 cur = g_curIdx, prev = g_prevIdx;
-        service_buffer(prev);   // on screen right now
-        if (cur != prev) service_buffer(cur);
+        sceKernelUsleep(300);
+        if (!g_ready || !g_fbKnown || !fb_supported()) continue;
+        cvlock();
+        for (int i = 0; i < MAX_FB; i++)
+            if (g_fb[i].addr) draw_buffer(i);
+        cvunlock();
     }
     scePthreadExit(NULL);
     return NULL;
@@ -507,7 +478,7 @@ static void* render_thread(void* arg) {
                     swap = true;
                 }
             }
-            layer_publish(L_STATUS, vis, (int)(24 * s), (int)(24 * s), 255, swap);
+            layer_publish(L_STATUS, vis, (int)(24 * s), (int)(24 * s), swap);
         }
 
         // --- crosshair
@@ -521,7 +492,7 @@ static void* render_thread(void* arg) {
                 TwCanvas* back = &L->cv[L->front ^ 1];
                 if (ensure(back, w, h)) { tw_draw_crosshair(back, s, accent); lastCrossS = s; swap = true; }
             }
-            layer_publish(L_CROSS, vis, W / 2 - w / 2, H / 2 - h / 2, 255, swap);
+            layer_publish(L_CROSS, vis, W / 2 - w / 2, H / 2 - h / 2, swap);
         }
 
         // --- menu panel (rendered even while closed, so the first open is instant)
@@ -536,7 +507,7 @@ static void* render_thread(void* arg) {
                 TwCanvas* back = &L->cv[L->front ^ 1];
                 if (ensure(back, w, h)) { tw_draw_menu(back, &m, s); lastPanelS = s; swap = true; }
             }
-            layer_publish(L_PANEL, open, (W - w) / 2, (H - h) / 2, m.opts[TW_TAB_VISUALS][V_OPACITY].v * 255 / 100, swap);
+            layer_publish(L_PANEL, open, (W - w) / 2, (H - h) / 2, swap);
         }
 
         // --- toast
@@ -555,7 +526,7 @@ static void* render_thread(void* arg) {
                 w = L->cv[swap ? (L->front ^ 1) : L->front].w;   // size of the canvas that will be shown
                 h = L->cv[swap ? (L->front ^ 1) : L->front].h;
             } else lastToast[0] = 0;
-            layer_publish(L_TOAST, vis, (W - w) / 2, H - h - (int)(24 * s), 255, swap);
+            layer_publish(L_TOAST, vis, (W - w) / 2, H - h - (int)(24 * s), swap);
         }
     }
     scePthreadExit(NULL);
@@ -576,8 +547,9 @@ s32 sceVideoOutRegisterBuffers_hook(s32 handle, s32 startIndex, void* const* add
         cvlock();
         memcpy(&g_fbAttr, attribute, sizeof(FbAttr));
         for (int i = 0; i < bufferNum; i++)
-            if (startIndex + i >= 0 && startIndex + i < MAX_FB) { g_fb[startIndex + i].addr = addresses[i]; memset(&g_bs[startIndex + i], 0, sizeof(BufState)); }
+            if (startIndex + i >= 0 && startIndex + i < MAX_FB) g_fb[startIndex + i].addr = addresses[i];
         g_fbKnown = true;
+        g_geo++;
         cvunlock();
         tw_log("framebuffers: %dx%d pitch=%u fmt=0x%x tiling=%d\n", g_fbAttr.width, g_fbAttr.height, g_fbAttr.pitch,
                g_fbAttr.format, g_fbAttr.tilingMode);
@@ -678,7 +650,7 @@ s32 attr_public plugin_unload(s32 argc, const char* argv[]) {
     UNHOOK(sceVideoOutSubmitFlip);
     UNHOOK(sceGnmSubmitAndFlipCommandBuffers);
     save_config(&g_menu);
-    for (int i = 0; i < L_COUNT; i++) { tw_canvas_free(&g_layer[i].cv[0]); tw_canvas_free(&g_layer[i].cv[1]); }
+    for (int i = 0; i < L_COUNT; i++) { tw_canvas_free(&g_layer[i].cv[0]); tw_canvas_free(&g_layer[i].cv[1]); free(g_layer[i].idx); free(g_layer[i].col); }
     return 0;
 }
 

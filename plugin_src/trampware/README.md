@@ -11,8 +11,8 @@ Controls (block game input while open, allow/deny vibration, navigation speed, b
 
 The menu is software-rendered (`source/render.c`, no SDK dependencies) on a background render thread and composited
 onto the game's video-out buffers by a background draw thread. Nothing heavy runs on the game or controller threads, so
-L3 + R3 opens/closes instantly. The draw thread watches a few sample pixels per buffer and puts the menu / watermark
-back as soon as the game repaints the frame, so they no longer flicker. Only **linear** A8R8G8B8 / A8B8G8R8 buffers are drawn while
+L3 + R3 opens/closes instantly. The draw thread stamps the menu / watermark (always fully opaque) onto every frame buffer a few hundred times a
+second, so whichever frame is on screen always has them and they no longer flicker. Only **linear** A8R8G8B8 / A8B8G8R8 buffers are drawn while
 *Draw on tiled games* is enabled.
 
 Install: copy `trampware.prx` to `/data/GoldHEN/plugins/` and add it to `/data/GoldHEN/plugins.ini`.
