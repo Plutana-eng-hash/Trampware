@@ -14,3 +14,8 @@ buffer from the `sceVideoOutSubmitFlip` hook. Only **linear** A8R8G8B8 / A8B8G8R
 *Safe mode* is on (default); games using tiled framebuffers will not show the overlay.
 
 Install: copy `trampware.prx` to `/data/GoldHEN/plugins/` and add it to `/data/GoldHEN/plugins.ini`.
+
+## Tiled games (experimental)
+Games that use tiled framebuffers show no overlay while *Safe mode* is on (the menu is sent as notifications instead).
+Turn **System > Safe mode** off (or set `3.1=0` in `/data/GoldHEN/trampware.ini`) to test drawing on tiled buffers.
+Expect a scrambled menu until the exact macro-tile layout of the game is mapped - a photo of the screen is enough to fix it.

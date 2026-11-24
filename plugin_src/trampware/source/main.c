@@ -65,9 +65,10 @@ static FbAttr g_fbAttr;
 static bool g_fbKnown;
 static bool g_overlayOk;            // true once the overlay was actually drawn on a supported framebuffer
 static char g_loadMsg[96] = "";     // custom load notification (message= in trampware.ini)
-static u32 g_lastSig = 0xFFFFFFFFu; // last menu state announced as a notification
 static bool g_wantNotify;
-static u64 g_nextNotify;
+static u64 g_pendAt;                // debounce: notify once the user stops moving
+static u32 g_pendSig = 0xFFFFFFFFu;
+static bool g_pending, g_diagShown;
 
 static TwMenu g_menu;
 static bool g_open;
@@ -159,9 +160,9 @@ static void notify_state(void) {
     static const char* tabs[TW_TAB_COUNT] = {"Visuals", "HUD", "Controls", "System"};
     const TwOpt* o = &g_menu.opts[g_menu.tab][g_menu.selected];
     char msg[128];
-    if (o->type == TW_TOGGLE) snprintf(msg, sizeof(msg), "[%s] %s: %s", tabs[g_menu.tab], o->label, o->v ? "ON" : "OFF");
-    else if (o->type == TW_SLIDER) snprintf(msg, sizeof(msg), "[%s] %s: %d%s", tabs[g_menu.tab], o->label, o->v, o->suffix);
-    else snprintf(msg, sizeof(msg), "[%s] %s  (press X)", tabs[g_menu.tab], o->label);
+    if (o->type == TW_TOGGLE) snprintf(msg, sizeof(msg), "%s > %s: %s", tabs[g_menu.tab], o->label, o->v ? "ON" : "OFF");
+    else if (o->type == TW_SLIDER) snprintf(msg, sizeof(msg), "%s > %s: %d%s", tabs[g_menu.tab], o->label, o->v, o->suffix);
+    else snprintf(msg, sizeof(msg), "%s > %s  (X to use)", tabs[g_menu.tab], o->label);
     NotifyStatic(TEX_ICON_SYSTEM, msg);
 }
 
@@ -201,17 +202,18 @@ static void set_open(bool open) {
     g_open = open;
     if (open) {
         OPT(TW_TAB_VISUALS, V_ENABLED).v = 1; g_wantNotify = true;
-        if (!g_overlayOk) {   // tell the user exactly why there is no on-screen overlay
+        if (!g_overlayOk && !g_diagShown) {   // explain why there is no on-screen overlay (once per session)
             char why[128];
-            if (!g_fbKnown) snprintf(why, sizeof(why), "Trampware: NO OVERLAY - game framebuffers not seen (plugin loaded after the game set up video). Using notifications");
-            else snprintf(why, sizeof(why), "Trampware: NO OVERLAY - fmt=0x%x tiling=%d %ux%u not drawable. Using notifications",
+            g_diagShown = true;
+            if (!g_fbKnown) snprintf(why, sizeof(why), "Trampware: no overlay (video buffers not seen). Using notifications");
+            else snprintf(why, sizeof(why), "Trampware: no overlay (fmt=0x%x tiling=%d %ux%u). Using notifications",
                           g_fbAttr.format, g_fbAttr.tilingMode, g_fbAttr.width, g_fbAttr.height);
             NotifyStatic(TEX_ICON_SYSTEM, why);
         }
     }
     else {
         save_config();
-        if (!g_overlayOk && OPT(TW_TAB_SYSTEM, S_FALLBACK).v) NotifyStatic(TEX_ICON_SYSTEM, "Trampware menu closed");
+        if (!g_overlayOk && OPT(TW_TAB_SYSTEM, S_FALLBACK).v) NotifyStatic(TEX_ICON_SYSTEM, "Trampware: menu closed");
     }
     g_dirty = true;
     tw_log("menu %s\n", open ? "opened" : "closed");
@@ -269,10 +271,8 @@ static bool menu_input(u32 btn) {
     if (g_open && !g_overlayOk && OPT(TW_TAB_SYSTEM, S_FALLBACK).v) {
         const TwOpt* c2 = &g_menu.opts[g_menu.tab][g_menu.selected];
         u32 sig = ((u32)g_menu.tab << 24) | ((u32)g_menu.selected << 16) | ((u32)c2->v & 0xFFFFu);
-        if ((sig != g_lastSig || g_wantNotify) && t >= g_nextNotify) {
-            notify_state();
-            g_lastSig = sig; g_wantNotify = false; g_nextNotify = t + 300;
-        }
+        if (g_wantNotify || sig != g_pendSig) { g_pendSig = sig; g_pendAt = t + 400; g_pending = true; g_wantNotify = false; }
+        if (g_pending && t >= g_pendAt) { notify_state(); g_pending = false; }
     }
     return OPT(TW_TAB_CONTROLS, C_BLOCK).v != 0;
 }
@@ -313,11 +313,20 @@ s32 scePadSetVibration_hook(s32 handle, const ScePadVibrationParam* param) {
 }
 
 // ------------------------------------------------------------------ compositing
+// Pixel index inside the framebuffer. Linear: row-major. Tiled (experimental): 8x8 micro tiles, row-major tile order,
+// pixel order inside a tile = x0 x1 y0 x2 y1 y2 (GCN display micro-tiling, 32bpp). Macro/bank swizzle is NOT applied yet,
+// so on 2D-tiled games the menu appears as shuffled 8x8 blocks - which shows the real macro layout.
+static bool g_tiledDraw;
+static inline size_t fb_index(int x, int y, int pitch) {
+    if (!g_tiledDraw) return (size_t)y * pitch + x;
+    unsigned m = (x & 1) | (((x >> 1) & 1) << 1) | ((y & 1) << 2) | (((x >> 2) & 1) << 3) | (((y >> 1) & 1) << 4) | (((y >> 2) & 1) << 5);
+    return ((size_t)(y >> 3) * (size_t)(pitch >> 3) + (size_t)(x >> 3)) * 64 + m;
+}
+
 static void blit(const TwCanvas* c, void* fbp, int fbPitch, int fbW, int fbH, int x0, int y0, int globalA, bool swapRB) {
     for (int j = 0; j < c->h; j++) {
         int y = y0 + j;
         if (y < 0 || y >= fbH) continue;
-        u32* dst = (u32*)fbp + (size_t)y * fbPitch;
         const u32* src = c->px + (size_t)j * c->w;
         for (int i = 0; i < c->w; i++) {
             int x = x0 + i;
@@ -327,13 +336,14 @@ static void blit(const TwCanvas* c, void* fbp, int fbPitch, int fbW, int fbH, in
             if (!a) continue;
             u32 sr = (s >> 16) & 255, sg = (s >> 8) & 255, sb = s & 255;
             if (swapRB) { u32 t = sr; sr = sb; sb = t; }
-            if (a >= 255) { dst[x] = 0xFF000000u | (sr << 16) | (sg << 8) | sb; continue; }
-            u32 d = dst[x];
+            u32* dp = (u32*)fbp + fb_index(x, y, fbPitch);
+            if (a >= 255) { *dp = 0xFF000000u | (sr << 16) | (sg << 8) | sb; continue; }
+            u32 d = *dp;
             u32 dr = (d >> 16) & 255, dg = (d >> 8) & 255, db = d & 255;
             dr += ((int)(sr - dr) * (int)a) / 255;
             dg += ((int)(sg - dg) * (int)a) / 255;
             db += ((int)(sb - db) * (int)a) / 255;
-            dst[x] = 0xFF000000u | (dr << 16) | (dg << 8) | db;
+            *dp = 0xFF000000u | (dr << 16) | (dg << 8) | db;
         }
     }
 }
@@ -423,7 +433,9 @@ s32 sceVideoOutSubmitFlip_hook(s32 handle, s32 bufferIndex, u32 flipMode, s64 fl
         const bool fmtOk = (g_fbAttr.format == FB_FMT_A8R8G8B8 || g_fbAttr.format == FB_FMT_A8B8G8R8);
         const bool linear = (g_fbAttr.tilingMode == FB_TILING_LINEAR);
         const bool safe = OPT(TW_TAB_SYSTEM, S_SAFE).v != 0;
-        if (fmtOk && (linear || !safe)) {
+        g_tiledDraw = !linear;
+        const bool dimsOk = linear || ((g_fbAttr.pitch % 8) == 0 && (g_fbAttr.height % 8) == 0 && g_fbAttr.pitch >= g_fbAttr.width);
+        if (fmtOk && dimsOk && (linear || !safe)) {
             g_overlayOk = true;
             draw_overlay(g_fb[bufferIndex].addr);
         } else {
