@@ -151,7 +151,7 @@ static const TwOpt kDefaults[TW_TAB_COUNT][TW_MAX_OPTS] = {
         {"Vibration", "Allow the game to vibrate the controller", TW_TOGGLE, 1, 0, 1, 1, "", ""},
         {"Navigation speed", "Repeat rate for directional input", TW_SLIDER, 5, 1, 10, 5, "", ""},
         {"Button hints", "Display navigation hints", TW_TOGGLE, 1, 0, 1, 1, "", ""},
-        {"Open with D-Pad Left", "Press once to open. Off = hold L1+R1+OPTIONS", TW_TOGGLE, 1, 0, 1, 1, "", ""},
+        {"Open with L3 + R3", "Press both sticks to open. Off = L1+R1+OPTIONS", TW_TOGGLE, 1, 0, 1, 1, "", ""},
     },
     /* System */ {
         {"Logging", "Write plugin messages to the kernel log", TW_TOGGLE, 0, 0, 1, 0, "", ""},
@@ -331,12 +331,12 @@ void tw_draw_menu(TwCanvas* c, const TwMenu* m, float sc) {
     text(c, mx, fcy, F(11), 0, 0, RGB(94, 94, 94), m->footer, 0, 0);
     if (m->hints) {
         // right aligned: [UP/DOWN] select  [LEFT/RIGHT] adjust  [X] toggle  [L1/R1] tab
-        static const char* keys[4] = {"UP/DOWN", "LEFT/RIGHT", "X", "L1/R1"};
-        static const char* what[4] = {" select  ", " adjust  ", " toggle  ", " tab"};
+        static const char* keys[5] = {"UP/DOWN", "LEFT/RIGHT", "X", "L1/R1", "O"};
+        static const char* what[5] = {" select  ", " adjust  ", " toggle  ", " tab  ", " close"};
         float total = 0;
-        for (int k = 0; k < 4; k++) total += text_w(keys[k], F(11), 0, 0) + P(12) + 2 + text_w(what[k], F(11), 0, 0);
+        for (int k = 0; k < 5; k++) total += text_w(keys[k], F(11), 0, 0) + P(12) + 2 + text_w(what[k], F(11), 0, 0);
         float x = mr - total;
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < 5; k++) {
             float kw = text_w(keys[k], F(11), 0, 0) + P(12) + 2;
             rrect(c, x, fcy - F(9.5f), kw, F(19), F(3), 0, RGB(51, 51, 51), 1);
             text(c, x + kw * 0.5f, fcy, F(11), 0, 0, RGB(170, 170, 170), keys[k], 2, 0);

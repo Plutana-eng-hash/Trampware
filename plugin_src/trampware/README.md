@@ -2,8 +2,8 @@
 
 Black / white in-game overlay menu for GoldHEN (`trampware.prx`).
 
-- **Open / close:** hold `L1 + R1 + OPTIONS`
-- **Navigate:** D-Pad up/down = select, left/right = adjust, `X` = toggle / activate, `L1`/`R1` = switch tab, `O` = close
+- **Open:** press `L3 + R3` together (Controls tab can switch this to `L1 + R1 + OPTIONS`). **Close:** `O` (Circle) or `L3 + R3` again
+- **Navigate:** D-Pad up/down = select, left/right = adjust, `X` = toggle / activate, `L1`/`R1` = switch tab, `Square` = reset option, `O` = close
 - **Settings file:** `/data/GoldHEN/trampware.ini` (written when the menu closes)
 
 Tabs: Visuals (opacity, scale, accent, compact layout), HUD (status panel with FPS, crosshair, HUD scale),

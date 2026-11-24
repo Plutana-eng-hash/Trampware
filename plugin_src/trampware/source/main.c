@@ -27,7 +27,9 @@ attr_public const char* g_pluginAuth = "Trampware";
 attr_public u32 g_pluginVersion = 0x00000100;  // 1.00
 
 #define CONFIG_PATH GOLDHEN_PATH "/trampware.ini"
-#define OPEN_COMBO (SCE_PAD_BUTTON_L1 | SCE_PAD_BUTTON_R1 | SCE_PAD_BUTTON_OPTIONS)
+#define COMBO_L3R3 (SCE_PAD_BUTTON_L3 | SCE_PAD_BUTTON_R3)
+#define COMBO_ALT  (SCE_PAD_BUTTON_L1 | SCE_PAD_BUTTON_R1 | SCE_PAD_BUTTON_OPTIONS)
+#define OPEN_COMBO open_combo()
 #define NAV_MASK (SCE_PAD_BUTTON_UP | SCE_PAD_BUTTON_DOWN | SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT | \
                   SCE_PAD_BUTTON_CROSS | SCE_PAD_BUTTON_CIRCLE | SCE_PAD_BUTTON_L1 | SCE_PAD_BUTTON_R1)
 
@@ -88,6 +90,7 @@ static int g_fpsFrames;
 static float g_fps;
 
 // ------------------------------------------------------------------ helpers
+static u32 open_combo(void);   // defined after the options are available
 static inline void lock(void) { while (__atomic_exchange_n(&g_lock, 1, __ATOMIC_ACQUIRE)) {} }
 static inline void unlock(void) { __atomic_store_n(&g_lock, 0, __ATOMIC_RELEASE); }
 
@@ -99,6 +102,8 @@ static u64 now_ms(void) {
 
 #define tw_log(fmt, args...) do { if (g_menu.opts[TW_TAB_SYSTEM][S_LOGGING].v) final_printf("[trampware] " fmt, ##args); } while (0)
 #define OPT(tab, i) (g_menu.opts[tab][i])
+// Open/close combo: L3 + R3 (default) or L1 + R1 + OPTIONS
+static u32 open_combo(void) { return OPT(TW_TAB_CONTROLS, C_TRIGGER).v ? COMBO_L3R3 : COMBO_ALT; }
 
 static void toast(const char* text) {
     snprintf(g_toast, sizeof(g_toast), "%s", text);
@@ -194,7 +199,16 @@ static void activate(TwOpt* o) {
 static void set_open(bool open) {
     if (g_open == open) return;
     g_open = open;
-    if (open) { OPT(TW_TAB_VISUALS, V_ENABLED).v = 1; g_wantNotify = true; }
+    if (open) {
+        OPT(TW_TAB_VISUALS, V_ENABLED).v = 1; g_wantNotify = true;
+        if (!g_overlayOk) {   // tell the user exactly why there is no on-screen overlay
+            char why[128];
+            if (!g_fbKnown) snprintf(why, sizeof(why), "Trampware: NO OVERLAY - game framebuffers not seen (plugin loaded after the game set up video). Using notifications");
+            else snprintf(why, sizeof(why), "Trampware: NO OVERLAY - fmt=0x%x tiling=%d %ux%u not drawable. Using notifications",
+                          g_fbAttr.format, g_fbAttr.tilingMode, g_fbAttr.width, g_fbAttr.height);
+            NotifyStatic(TEX_ICON_SYSTEM, why);
+        }
+    }
     else {
         save_config();
         if (!g_overlayOk && OPT(TW_TAB_SYSTEM, S_FALLBACK).v) NotifyStatic(TEX_ICON_SYSTEM, "Trampware menu closed");
@@ -211,10 +225,10 @@ static bool menu_input(u32 btn) {
     u32 pressed = btn & ~g_prevBtn;
     g_prevBtn = btn;
 
-    // Open: a single PRESS of D-Pad Left (when enabled) or the L1+R1+OPTIONS combo. Close: CIRCLE or the combo.
-    const bool combo = (btn & OPEN_COMBO) == OPEN_COMBO && (pressed & OPEN_COMBO);
-    const bool leftTap = OPT(TW_TAB_CONTROLS, C_TRIGGER).v && !g_open && (pressed & SCE_PAD_BUTTON_LEFT);
-    if (combo || leftTap) {
+    // Open/close: press L3 + R3 together (or L1+R1+OPTIONS if switched in Controls). CIRCLE (O) also closes.
+    const u32 oc = open_combo();
+    const bool combo = (btn & oc) == oc && (pressed & oc);
+    if (combo) {
         set_open(!g_open);
         g_swallow = btn;   // ignore everything held right now until it is released
         return true;
@@ -464,7 +478,7 @@ s32 attr_public plugin_load(s32 argc, const char* argv[]) {
         char msg[128];
         if (g_loadMsg[0]) snprintf(msg, sizeof(msg), "%s", g_loadMsg);
         else snprintf(msg, sizeof(msg), "Trampware loaded - %s to open the menu",
-                      OPT(TW_TAB_CONTROLS, C_TRIGGER).v ? "press D-Pad Left" : "hold L1 + R1 + OPTIONS");
+                      OPT(TW_TAB_CONTROLS, C_TRIGGER).v ? "press L3 + R3" : "hold L1 + R1 + OPTIONS");
         NotifyStatic(TEX_ICON_SYSTEM, msg);
     }
     return 0;
