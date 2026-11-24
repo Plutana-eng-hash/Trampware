@@ -34,8 +34,8 @@ attr_public u32 g_pluginVersion = 0x00000100;  // 1.00
 // Option indices (see kDefaults in render.c)
 enum { V_ENABLED, V_COMPACT, V_OPACITY, V_SCALE, V_ACCENT };
 enum { H_ENABLED, H_CROSSHAIR, H_STATUS, H_SCALE };
-enum { C_BLOCK, C_VIBRATION, C_SPEED, C_HINTS };
-enum { S_LOGGING, S_SAFE, S_RESET, S_ABOUT };
+enum { C_BLOCK, C_VIBRATION, C_SPEED, C_HINTS, C_TRIGGER };
+enum { S_LOGGING, S_SAFE, S_NOTIFY, S_FALLBACK, S_RESET, S_ABOUT };
 
 HOOK_INIT(scePadRead);
 HOOK_INIT(scePadReadState);
@@ -61,7 +61,11 @@ typedef struct { s32 format; s32 tilingMode; s32 aspect; u32 width; u32 height; 
 static struct { void* addr; } g_fb[MAX_FB];
 static FbAttr g_fbAttr;
 static bool g_fbKnown;
-static bool g_tiledWarned;
+static bool g_overlayOk;            // true once the overlay was actually drawn on a supported framebuffer
+static char g_loadMsg[96] = "";     // custom load notification (message= in trampware.ini)
+static u32 g_lastSig = 0xFFFFFFFFu; // last menu state announced as a notification
+static bool g_wantNotify;
+static u64 g_nextNotify;
 
 static TwMenu g_menu;
 static bool g_open;
@@ -109,14 +113,21 @@ static void save_config(void) {
     for (int t = 0; t < TW_TAB_COUNT; t++)
         for (int i = 0; i < g_menu.count[t]; i++)
             if (g_menu.opts[t][i].type != TW_ACTION) fprintf(f, "%d.%d=%d\n", t, i, g_menu.opts[t][i].v);
+    fprintf(f, "message=%s\n", g_loadMsg);   // edit this line to change the loading notification
     fclose(f);
 }
 
-static void load_config(void) {
+static bool load_config(void) {
     FILE* f = fopen(CONFIG_PATH, "r");
-    if (!f) return;
-    char line[64];
+    if (!f) return false;
+    char line[128];
     while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "message=", 8) == 0) {
+            snprintf(g_loadMsg, sizeof(g_loadMsg), "%s", line + 8);
+            size_t n = strlen(g_loadMsg);
+            while (n && (g_loadMsg[n - 1] == '\n' || g_loadMsg[n - 1] == '\r')) g_loadMsg[--n] = 0;
+            continue;
+        }
         int t, i, v;
         if (sscanf(line, "%d.%d=%d", &t, &i, &v) == 3 && t >= 0 && t < TW_TAB_COUNT && i >= 0 && i < g_menu.count[t]) {
             TwOpt* o = &g_menu.opts[t][i];
@@ -125,6 +136,7 @@ static void load_config(void) {
         }
     }
     fclose(f);
+    return true;
 }
 
 // Copy the look-and-feel options into the menu struct used by the renderer
@@ -136,6 +148,18 @@ static void sync_look(void) {
 
 // ------------------------------------------------------------------ menu logic
 static void set_open(bool open);
+
+// Menu state as a system notification (used when the game's framebuffer cannot be drawn on)
+static void notify_state(void) {
+    static const char* tabs[TW_TAB_COUNT] = {"Visuals", "HUD", "Controls", "System"};
+    const TwOpt* o = &g_menu.opts[g_menu.tab][g_menu.selected];
+    char msg[128];
+    if (o->type == TW_TOGGLE) snprintf(msg, sizeof(msg), "[%s] %s: %s", tabs[g_menu.tab], o->label, o->v ? "ON" : "OFF");
+    else if (o->type == TW_SLIDER) snprintf(msg, sizeof(msg), "[%s] %s: %d%s", tabs[g_menu.tab], o->label, o->v, o->suffix);
+    else snprintf(msg, sizeof(msg), "[%s] %s  (press X)", tabs[g_menu.tab], o->label);
+    NotifyStatic(TEX_ICON_SYSTEM, msg);
+}
+
 static void change(TwOpt* o, int dir, bool announce) {
     char msg[64];
     if (o->type == TW_TOGGLE) {
@@ -170,8 +194,11 @@ static void activate(TwOpt* o) {
 static void set_open(bool open) {
     if (g_open == open) return;
     g_open = open;
-    if (open) OPT(TW_TAB_VISUALS, V_ENABLED).v = 1;
-    else save_config();
+    if (open) { OPT(TW_TAB_VISUALS, V_ENABLED).v = 1; g_wantNotify = true; }
+    else {
+        save_config();
+        if (!g_overlayOk && OPT(TW_TAB_SYSTEM, S_FALLBACK).v) NotifyStatic(TEX_ICON_SYSTEM, "Trampware menu closed");
+    }
     g_dirty = true;
     tw_log("menu %s\n", open ? "opened" : "closed");
 }
@@ -184,13 +211,16 @@ static bool menu_input(u32 btn) {
     u32 pressed = btn & ~g_prevBtn;
     g_prevBtn = btn;
 
-    if ((btn & OPEN_COMBO) == OPEN_COMBO && (pressed & OPEN_COMBO)) {
+    // Open: a single PRESS of D-Pad Left (when enabled) or the L1+R1+OPTIONS combo. Close: CIRCLE or the combo.
+    const bool combo = (btn & OPEN_COMBO) == OPEN_COMBO && (pressed & OPEN_COMBO);
+    const bool leftTap = OPT(TW_TAB_CONTROLS, C_TRIGGER).v && !g_open && (pressed & SCE_PAD_BUTTON_LEFT);
+    if (combo || leftTap) {
         set_open(!g_open);
         g_swallow = btn;   // ignore everything held right now until it is released
         return true;
     }
     g_swallow &= btn;
-    if (!g_open) return false;
+    if (!g_open) return g_swallow != 0;   // keep hiding the opening press from the game until it is released
 
     u32 b = btn & ~g_swallow;
     u32 p = pressed & ~g_swallow;
@@ -201,6 +231,9 @@ static bool menu_input(u32 btn) {
     if (p & SCE_PAD_BUTTON_R1) { g_menu.tab = (g_menu.tab + 1) % TW_TAB_COUNT; g_menu.selected = 0; g_dirty = true; }
     if (p & SCE_PAD_BUTTON_CIRCLE) set_open(false);
     if (p & SCE_PAD_BUTTON_CROSS) activate(cur);
+    if ((p & SCE_PAD_BUTTON_SQUARE) && cur->type != TW_ACTION) {   // SQUARE = reset the selected option
+        cur->v = cur->def; sync_look(); g_dirty = true; toast("Reset to default");
+    }
 
     // d-pad with key repeat (navigation speed 1..10)
     u32 dirs = b & (SCE_PAD_BUTTON_UP | SCE_PAD_BUTTON_DOWN | SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT);
@@ -216,6 +249,15 @@ static bool menu_input(u32 btn) {
             TwOpt* o = &g_menu.opts[g_menu.tab][g_menu.selected];
             if (o->type == TW_TOGGLE) { if (p & (SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT)) change(o, 0, true); }
             else change(o, dir, false);
+        }
+    }
+    // notification mode: announce selection / value changes (rate limited)
+    if (g_open && !g_overlayOk && OPT(TW_TAB_SYSTEM, S_FALLBACK).v) {
+        const TwOpt* c2 = &g_menu.opts[g_menu.tab][g_menu.selected];
+        u32 sig = ((u32)g_menu.tab << 24) | ((u32)g_menu.selected << 16) | ((u32)c2->v & 0xFFFFu);
+        if ((sig != g_lastSig || g_wantNotify) && t >= g_nextNotify) {
+            notify_state();
+            g_lastSig = sig; g_wantNotify = false; g_nextNotify = t + 300;
         }
     }
     return OPT(TW_TAB_CONTROLS, C_BLOCK).v != 0;
@@ -368,10 +410,10 @@ s32 sceVideoOutSubmitFlip_hook(s32 handle, s32 bufferIndex, u32 flipMode, s64 fl
         const bool linear = (g_fbAttr.tilingMode == FB_TILING_LINEAR);
         const bool safe = OPT(TW_TAB_SYSTEM, S_SAFE).v != 0;
         if (fmtOk && (linear || !safe)) {
+            g_overlayOk = true;
             draw_overlay(g_fb[bufferIndex].addr);
-        } else if (!g_tiledWarned && g_open) {
-            g_tiledWarned = true;
-            NotifyStatic(TEX_ICON_SYSTEM, "Trampware: this game uses a tiled/unsupported framebuffer");
+        } else {
+            g_overlayOk = false;   // unsupported / tiled framebuffer: the menu falls back to notifications
         }
     }
     return HOOK_CONTINUE(sceVideoOutSubmitFlip, s32 (*)(s32, s32, u32, s64), handle, bufferIndex, flipMode, flipArg);
@@ -386,8 +428,9 @@ s32 attr_public plugin_load(s32 argc, const char* argv[]) {
     if (sys_sdk_proc_info(&procInfo) == 0) snprintf(g_titleid, sizeof(g_titleid), "%s", procInfo.titleid);
 
     tw_menu_init(&g_menu);
-    load_config();
+    bool hadConfig = load_config();
     sync_look();
+    if (!hadConfig) save_config();   // create trampware.ini so the message= line can be edited
 
     // libScePad may not be loaded yet when the plugin starts. libSceVideoOut is always loaded by the game
     // (and loading it a second time is unnecessary), so only the pad library is loaded here.
@@ -417,7 +460,13 @@ s32 attr_public plugin_load(s32 argc, const char* argv[]) {
     HOOK32(sceVideoOutRegisterBuffers);
     HOOK32(sceVideoOutSubmitFlip);
 
-    NotifyStatic(TEX_ICON_SYSTEM, "Trampware loaded - hold L1 + R1 + OPTIONS to open the menu");
+    if (OPT(TW_TAB_SYSTEM, S_NOTIFY).v) {
+        char msg[128];
+        if (g_loadMsg[0]) snprintf(msg, sizeof(msg), "%s", g_loadMsg);
+        else snprintf(msg, sizeof(msg), "Trampware loaded - %s to open the menu",
+                      OPT(TW_TAB_CONTROLS, C_TRIGGER).v ? "press D-Pad Left" : "hold L1 + R1 + OPTIONS");
+        NotifyStatic(TEX_ICON_SYSTEM, msg);
+    }
     return 0;
 }
 

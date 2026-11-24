@@ -151,15 +151,18 @@ static const TwOpt kDefaults[TW_TAB_COUNT][TW_MAX_OPTS] = {
         {"Vibration", "Allow the game to vibrate the controller", TW_TOGGLE, 1, 0, 1, 1, "", ""},
         {"Navigation speed", "Repeat rate for directional input", TW_SLIDER, 5, 1, 10, 5, "", ""},
         {"Button hints", "Display navigation hints", TW_TOGGLE, 1, 0, 1, 1, "", ""},
+        {"Open with D-Pad Left", "Press once to open. Off = hold L1+R1+OPTIONS", TW_TOGGLE, 1, 0, 1, 1, "", ""},
     },
     /* System */ {
         {"Logging", "Write plugin messages to the kernel log", TW_TOGGLE, 0, 0, 1, 0, "", ""},
         {"Safe mode", "Only draw on linear framebuffers", TW_TOGGLE, 1, 0, 1, 1, "", ""},
+        {"Load notification", "Show a message when the plugin loads", TW_TOGGLE, 1, 0, 1, 1, "", ""},
+        {"Notification mode", "No overlay in this game: show the menu as notifications", TW_TOGGLE, 1, 0, 1, 1, "", ""},
         {"Reset settings", "Restore Trampware to defaults", TW_ACTION, 0, 0, 0, 0, "", "Reset"},
         {"About Trampware", "Black / white menu", TW_ACTION, 0, 0, 0, 0, "", "Info"},
     },
 };
-static const int kCounts[TW_TAB_COUNT] = {5, 4, 4, 4};
+static const int kCounts[TW_TAB_COUNT] = {5, 4, 5, 6};
 
 void tw_menu_reset(TwMenu* m) {
     int tab = m->tab, sel = m->selected;
@@ -322,7 +325,7 @@ void tw_draw_menu(TwCanvas* c, const TwMenu* m, float sc) {
     }
 
     // footer
-    float fy = P(157 + 5 * 62 - 2 + 22);
+    float fy = P(157 + 6 * 62 - 2 + 22);
     hline(c, mx, fy, mr - mx, P(1), RGB(36, 36, 36));
     float fcy = fy + P(13) + F(8.25f);
     text(c, mx, fcy, F(11), 0, 0, RGB(94, 94, 94), m->footer, 0, 0);

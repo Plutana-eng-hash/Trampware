@@ -33,7 +33,7 @@ typedef struct {
 } TwMenu;
 
 #define TW_PANEL_W 980
-#define TW_PANEL_H 570
+#define TW_PANEL_H 630
 
 void tw_menu_init(TwMenu* m);
 void tw_menu_reset(TwMenu* m);
