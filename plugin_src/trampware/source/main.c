@@ -44,6 +44,13 @@ HOOK_INIT(scePadReadState);
 HOOK_INIT(scePadSetVibration);
 HOOK_INIT(sceVideoOutRegisterBuffers);
 HOOK_INIT(sceVideoOutSubmitFlip);
+HOOK_INIT(sceGnmSubmitAndFlipCommandBuffers);
+
+// Most PS4 games present through the graphics driver, not sceVideoOutSubmitFlip (same hook as frame_logger).
+s32 sceGnmSubmitAndFlipCommandBuffers(u32 count, void* dcbGpuAddrs[], u32* dcbSizesInBytes, void* ccbGpuAddrs[],
+                                      u32* ccbSizesInBytes, u32 videoOutHandle, u32 displayBufferIndex, u32 flipMode, s64 flipArg);
+static volatile bool g_gnmSeen;   // once the Gnm flip path is seen, the VideoOut hook stops drawing
+static s32 g_prevIdx = -1;
 
 // The stock scePadRead / scePadReadState are tiny stubs that tail-call scePadReadExt / scePadReadStateExt.
 // Their first bytes are not safe to copy into a hook trampoline, so calling the "original" through
@@ -393,7 +400,7 @@ s32 sceVideoOutRegisterBuffers_hook(s32 handle, s32 startIndex, void* const* add
     return ret;
 }
 
-s32 sceVideoOutSubmitFlip_hook(s32 handle, s32 bufferIndex, u32 flipMode, s64 flipArg) {
+static void overlay_on(s32 bufferIndex) {
     if (g_ready && g_fbKnown && bufferIndex >= 0 && bufferIndex < MAX_FB && g_fb[bufferIndex].addr) {
         const bool fmtOk = (g_fbAttr.format == FB_FMT_A8R8G8B8 || g_fbAttr.format == FB_FMT_A8B8G8R8);
         const bool linear = (g_fbAttr.tilingMode == FB_TILING_LINEAR);
@@ -407,7 +414,22 @@ s32 sceVideoOutSubmitFlip_hook(s32 handle, s32 bufferIndex, u32 flipMode, s64 fl
             g_overlayOk = false;
         }
     }
+}
+
+s32 sceVideoOutSubmitFlip_hook(s32 handle, s32 bufferIndex, u32 flipMode, s64 flipArg) {
+    if (!g_gnmSeen) overlay_on(bufferIndex);
     return HOOK_CONTINUE(sceVideoOutSubmitFlip, s32 (*)(s32, s32, u32, s64), handle, bufferIndex, flipMode, flipArg);
+}
+
+// The GPU is still rendering the buffer being submitted now, so draw onto the one submitted last frame (already finished).
+s32 sceGnmSubmitAndFlipCommandBuffers_hook(u32 count, void* dcbGpuAddrs[], u32* dcbSizesInBytes, void* ccbGpuAddrs[],
+                                           u32* ccbSizesInBytes, u32 videoOutHandle, u32 displayBufferIndex, u32 flipMode, s64 flipArg) {
+    g_gnmSeen = true;
+    if (g_prevIdx >= 0) overlay_on(g_prevIdx);
+    g_prevIdx = (s32)displayBufferIndex;
+    return HOOK_CONTINUE(sceGnmSubmitAndFlipCommandBuffers,
+                         s32 (*)(u32, void**, u32*, void**, u32*, u32, u32, u32, s64),
+                         count, dcbGpuAddrs, dcbSizesInBytes, ccbGpuAddrs, ccbSizesInBytes, videoOutHandle, displayBufferIndex, flipMode, flipArg);
 }
 
 // ------------------------------------------------------------------ plugin entry points
@@ -450,6 +472,7 @@ s32 attr_public plugin_load(s32 argc, const char* argv[]) {
     HOOK32(scePadSetVibration);
     HOOK32(sceVideoOutRegisterBuffers);
     HOOK32(sceVideoOutSubmitFlip);
+    HOOK32(sceGnmSubmitAndFlipCommandBuffers);
 
     if (OPT(TW_TAB_SYSTEM, S_NOTIFY).v) {
         char msg[128];
@@ -469,6 +492,7 @@ s32 attr_public plugin_unload(s32 argc, const char* argv[]) {
     UNHOOK(scePadSetVibration);
     UNHOOK(sceVideoOutRegisterBuffers);
     UNHOOK(sceVideoOutSubmitFlip);
+    UNHOOK(sceGnmSubmitAndFlipCommandBuffers);
     save_config();
     tw_canvas_free(&g_panel); tw_canvas_free(&g_status); tw_canvas_free(&g_cross); tw_canvas_free(&g_toastCv);
     return 0;
