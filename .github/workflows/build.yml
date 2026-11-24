@@ -1,0 +1,59 @@
+name: Build Trampware
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@main
+      with:
+        fetch-depth: 0
+
+    - name: Checkout GoldHEN SDK
+      uses: actions/checkout@main
+      with:
+        repository: GoldHEN/GoldHEN_Plugins_SDK
+        path: SDK
+
+    - name: Checkout mxml
+      uses: actions/checkout@main
+      with:
+        repository: illusion0001/mxml
+        ref: clang-14
+        path: mxml
+
+    - name: Setup
+      run: |
+        sudo apt install -y llvm lld
+        echo "OO_PS4_TOOLCHAIN=$GITHUB_WORKSPACE/OpenOrbis/PS4Toolchain" >> $GITHUB_ENV
+        echo "GOLDHEN_SDK=$GITHUB_WORKSPACE/SDK" >> $GITHUB_ENV
+
+    - name: Download OpenOrbis toolchain
+      run: curl -sL https://github.com/illusion0001/OpenOrbis-PS4-Toolchain/releases/latest/download/toolchain.tar.gz | tar xz -C ./
+
+    - name: Install mini xml
+      working-directory: mxml/ps4
+      run: |
+        wget https://raw.githubusercontent.com/bucanero/oosdk_libraries/master/build_rules.mk -O $OO_PS4_TOOLCHAIN/build_rules.mk
+        make install PRX_BUILD=1
+
+    - name: Build SDK
+      run: make -C $GOLDHEN_SDK PRINTF=1 DEBUGFLAGS=1
+
+    - name: Build Trampware (release)
+      run: |
+        mkdir -p bin/plugins/prx_final bin/plugins/elf_final
+        make -C plugin_src/trampware clean
+        make -C plugin_src/trampware DEBUG=0 PRINTF=1
+        cp bin/plugins/prx_final/trampware.prx bin/plugins/prx_final/trampware.sprx
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: trampware-plugin
+        path: |
+          bin/plugins/prx_final/trampware.prx
+          bin/plugins/prx_final/trampware.sprx
+        if-no-files-found: error
