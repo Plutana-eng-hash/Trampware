@@ -69,8 +69,16 @@ jobs:
     - name: Build (Debug)
       run: make DEBUG=1
 
+    - name: Upload trampware.prx
+      uses: actions/upload-artifact@main
+      with:
+        name: trampware_prx
+        path: |
+          bin/plugins/prx_final/trampware.prx
+          bin/plugins/prx_debug/trampware.prx
+        if-no-files-found: error
+
     - name: Upload modules (Release prx)
-      if: github.event_name == 'pull_request'
       uses: actions/upload-artifact@main
       with:
         name: goldplugins_${{ env.commit_ver }}-${{ env.commit_hash }}_prx_final
@@ -78,7 +86,6 @@ jobs:
         if-no-files-found: error
 
     - name: Upload modules (Release elf symbols)
-      if: github.event_name == 'pull_request'
       uses: actions/upload-artifact@main
       with:
         name: goldplugins_${{ env.commit_ver }}-${{ env.commit_hash }}_elf_final
@@ -86,7 +93,6 @@ jobs:
         if-no-files-found: error
 
     - name: Upload modules (Debug prx)
-      if: github.event_name == 'pull_request'
       uses: actions/upload-artifact@main
       with:
         name: goldplugins_${{ env.commit_ver }}-${{ env.commit_hash }}_prx_debug
@@ -94,7 +100,6 @@ jobs:
         if-no-files-found: error
 
     - name: Upload modules (Debug elf symbols)
-      if: github.event_name == 'pull_request'
       uses: actions/upload-artifact@main
       with:
         name: goldplugins_${{ env.commit_ver }}-${{ env.commit_hash }}_elf_debug
