@@ -400,6 +400,24 @@ s32 sceVideoOutRegisterBuffers_hook(s32 handle, s32 startIndex, void* const* add
     return ret;
 }
 
+// ---- TILE PROBE (temporary) -------------------------------------------------------------
+// Paints the first PROBE_TILES 8x8 blocks of buffer MEMORY (256 bytes each) with a colour that encodes the block number
+// (R = 3 bits, G = 3 bits, B = 2 bits of k & 255). A screenshot then shows where each block of memory lands on screen,
+// which reveals the real tiled layout of the game.
+#define PROBE_TILES 8192
+static void draw_probe(void* fbp) {
+    const bool swap = (g_fbAttr.format == FB_FMT_A8B8G8R8);
+    const size_t total = (size_t)g_fbAttr.pitch * g_fbAttr.height;
+    size_t n = (size_t)PROBE_TILES * 64;
+    if (n > total) n = total;
+    u32* p = (u32*)fbp;
+    for (size_t i = 0; i < n; i++) {
+        u32 k = (u32)(i >> 6) & 255u;
+        u32 r = ((k >> 5) & 7u) * 36u, g = ((k >> 2) & 7u) * 36u, b = (k & 3u) * 85u;
+        p[i] = swap ? (0xFF000000u | (b << 16) | (g << 8) | r) : (0xFF000000u | (r << 16) | (g << 8) | b);
+    }
+}
+
 static void overlay_on(s32 bufferIndex) {
     if (g_ready && g_fbKnown && bufferIndex >= 0 && bufferIndex < MAX_FB && g_fb[bufferIndex].addr) {
         const bool fmtOk = (g_fbAttr.format == FB_FMT_A8R8G8B8 || g_fbAttr.format == FB_FMT_A8B8G8R8);
@@ -409,7 +427,8 @@ static void overlay_on(s32 bufferIndex) {
         const bool dimsOk = linear || ((g_fbAttr.pitch % 8) == 0 && (g_fbAttr.height % 8) == 0 && g_fbAttr.pitch >= g_fbAttr.width);
         if (fmtOk && dimsOk && (linear || tiledOn)) {
             g_overlayOk = true;
-            draw_overlay(g_fb[bufferIndex].addr);
+            if (!linear) { if (g_open) draw_probe(g_fb[bufferIndex].addr); }   // tiled: probe pattern until the layout is mapped
+            else draw_overlay(g_fb[bufferIndex].addr);
         } else {
             g_overlayOk = false;
         }
