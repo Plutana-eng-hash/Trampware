@@ -37,7 +37,7 @@ attr_public u32 g_pluginVersion = 0x00000100;  // 1.00
 enum { V_ENABLED, V_COMPACT, V_OPACITY, V_SCALE, V_ACCENT };
 enum { H_ENABLED, H_CROSSHAIR, H_STATUS, H_SCALE };
 enum { C_BLOCK, C_VIBRATION, C_SPEED, C_HINTS, C_TRIGGER };
-enum { S_LOGGING, S_SAFE, S_NOTIFY, S_FALLBACK, S_RESET, S_ABOUT };
+enum { S_LOGGING, S_TILED, S_NOTIFY, S_RESET, S_ABOUT };
 
 HOOK_INIT(scePadRead);
 HOOK_INIT(scePadReadState);
@@ -65,10 +65,6 @@ static FbAttr g_fbAttr;
 static bool g_fbKnown;
 static bool g_overlayOk;            // true once the overlay was actually drawn on a supported framebuffer
 static char g_loadMsg[96] = "";     // custom load notification (message= in trampware.ini)
-static bool g_wantNotify;
-static u64 g_pendAt;                // debounce: notify once the user stops moving
-static u32 g_pendSig = 0xFFFFFFFFu;
-static bool g_pending, g_diagShown;
 
 static TwMenu g_menu;
 static bool g_open;
@@ -155,17 +151,6 @@ static void sync_look(void) {
 // ------------------------------------------------------------------ menu logic
 static void set_open(bool open);
 
-// Menu state as a system notification (used when the game's framebuffer cannot be drawn on)
-static void notify_state(void) {
-    static const char* tabs[TW_TAB_COUNT] = {"Visuals", "HUD", "Controls", "System"};
-    const TwOpt* o = &g_menu.opts[g_menu.tab][g_menu.selected];
-    char msg[128];
-    if (o->type == TW_TOGGLE) snprintf(msg, sizeof(msg), "%s > %s: %s", tabs[g_menu.tab], o->label, o->v ? "ON" : "OFF");
-    else if (o->type == TW_SLIDER) snprintf(msg, sizeof(msg), "%s > %s: %d%s", tabs[g_menu.tab], o->label, o->v, o->suffix);
-    else snprintf(msg, sizeof(msg), "%s > %s  (X to use)", tabs[g_menu.tab], o->label);
-    NotifyStatic(TEX_ICON_SYSTEM, msg);
-}
-
 static void change(TwOpt* o, int dir, bool announce) {
     char msg[64];
     if (o->type == TW_TOGGLE) {
@@ -200,21 +185,8 @@ static void activate(TwOpt* o) {
 static void set_open(bool open) {
     if (g_open == open) return;
     g_open = open;
-    if (open) {
-        OPT(TW_TAB_VISUALS, V_ENABLED).v = 1; g_wantNotify = true;
-        if (!g_overlayOk && !g_diagShown) {   // explain why there is no on-screen overlay (once per session)
-            char why[128];
-            g_diagShown = true;
-            if (!g_fbKnown) snprintf(why, sizeof(why), "Trampware: no overlay (video buffers not seen). Using notifications");
-            else snprintf(why, sizeof(why), "Trampware: no overlay (fmt=0x%x tiling=%d %ux%u). Using notifications",
-                          g_fbAttr.format, g_fbAttr.tilingMode, g_fbAttr.width, g_fbAttr.height);
-            NotifyStatic(TEX_ICON_SYSTEM, why);
-        }
-    }
-    else {
-        save_config();
-        if (!g_overlayOk && OPT(TW_TAB_SYSTEM, S_FALLBACK).v) NotifyStatic(TEX_ICON_SYSTEM, "Trampware: menu closed");
-    }
+    if (open) OPT(TW_TAB_VISUALS, V_ENABLED).v = 1;
+    else save_config();
     g_dirty = true;
     tw_log("menu %s\n", open ? "opened" : "closed");
 }
@@ -266,13 +238,6 @@ static bool menu_input(u32 btn) {
             if (o->type == TW_TOGGLE) { if (p & (SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT)) change(o, 0, true); }
             else change(o, dir, false);
         }
-    }
-    // notification mode: announce selection / value changes (rate limited)
-    if (g_open && !g_overlayOk && OPT(TW_TAB_SYSTEM, S_FALLBACK).v) {
-        const TwOpt* c2 = &g_menu.opts[g_menu.tab][g_menu.selected];
-        u32 sig = ((u32)g_menu.tab << 24) | ((u32)g_menu.selected << 16) | ((u32)c2->v & 0xFFFFu);
-        if (g_wantNotify || sig != g_pendSig) { g_pendSig = sig; g_pendAt = t + 400; g_pending = true; g_wantNotify = false; }
-        if (g_pending && t >= g_pendAt) { notify_state(); g_pending = false; }
     }
     return OPT(TW_TAB_CONTROLS, C_BLOCK).v != 0;
 }
@@ -432,14 +397,14 @@ s32 sceVideoOutSubmitFlip_hook(s32 handle, s32 bufferIndex, u32 flipMode, s64 fl
     if (g_ready && g_fbKnown && bufferIndex >= 0 && bufferIndex < MAX_FB && g_fb[bufferIndex].addr) {
         const bool fmtOk = (g_fbAttr.format == FB_FMT_A8R8G8B8 || g_fbAttr.format == FB_FMT_A8B8G8R8);
         const bool linear = (g_fbAttr.tilingMode == FB_TILING_LINEAR);
-        const bool safe = OPT(TW_TAB_SYSTEM, S_SAFE).v != 0;
+        const bool tiledOn = OPT(TW_TAB_SYSTEM, S_TILED).v != 0;
         g_tiledDraw = !linear;
         const bool dimsOk = linear || ((g_fbAttr.pitch % 8) == 0 && (g_fbAttr.height % 8) == 0 && g_fbAttr.pitch >= g_fbAttr.width);
-        if (fmtOk && dimsOk && (linear || !safe)) {
+        if (fmtOk && dimsOk && (linear || tiledOn)) {
             g_overlayOk = true;
             draw_overlay(g_fb[bufferIndex].addr);
         } else {
-            g_overlayOk = false;   // unsupported / tiled framebuffer: the menu falls back to notifications
+            g_overlayOk = false;
         }
     }
     return HOOK_CONTINUE(sceVideoOutSubmitFlip, s32 (*)(s32, s32, u32, s64), handle, bufferIndex, flipMode, flipArg);

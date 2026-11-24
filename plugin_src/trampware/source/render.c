@@ -155,14 +155,13 @@ static const TwOpt kDefaults[TW_TAB_COUNT][TW_MAX_OPTS] = {
     },
     /* System */ {
         {"Logging", "Write plugin messages to the kernel log", TW_TOGGLE, 0, 0, 1, 0, "", ""},
-        {"Safe mode", "Only draw on linear framebuffers", TW_TOGGLE, 1, 0, 1, 1, "", ""},
+        {"Draw on tiled games", "Needed for most games. Turn off if the screen glitches", TW_TOGGLE, 1, 0, 1, 1, "", ""},
         {"Load notification", "Show a message when the plugin loads", TW_TOGGLE, 1, 0, 1, 1, "", ""},
-        {"Notification mode", "No overlay in this game: show the menu as notifications", TW_TOGGLE, 1, 0, 1, 1, "", ""},
         {"Reset settings", "Restore Trampware to defaults", TW_ACTION, 0, 0, 0, 0, "", "Reset"},
         {"About Trampware", "Black / white menu", TW_ACTION, 0, 0, 0, 0, "", "Info"},
     },
 };
-static const int kCounts[TW_TAB_COUNT] = {5, 4, 5, 6};
+static const int kCounts[TW_TAB_COUNT] = {5, 4, 5, 5};
 
 void tw_menu_reset(TwMenu* m) {
     int tab = m->tab, sel = m->selected;

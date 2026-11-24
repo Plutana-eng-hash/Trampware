@@ -11,11 +11,11 @@ Controls (block game input while open, allow/deny vibration, navigation speed, b
 
 The menu is software-rendered (`source/render.c`, no SDK dependencies) and composited onto the game's video-out
 buffer from the `sceVideoOutSubmitFlip` hook. Only **linear** A8R8G8B8 / A8B8G8R8 buffers are drawn while
-*Safe mode* is on (default); games using tiled framebuffers will not show the overlay.
+*Draw on tiled games* is enabled.
 
 Install: copy `trampware.prx` to `/data/GoldHEN/plugins/` and add it to `/data/GoldHEN/plugins.ini`.
 
 ## Tiled games (experimental)
-Games that use tiled framebuffers show no overlay while *Safe mode* is on (the menu is sent as notifications instead).
-Turn **System > Safe mode** off (or set `3.1=0` in `/data/GoldHEN/trampware.ini`) to test drawing on tiled buffers.
-Expect a scrambled menu until the exact macro-tile layout of the game is mapped - a photo of the screen is enough to fix it.
+Most games use tiled framebuffers. **System > Draw on tiled games** (on by default) draws the menu on them using an
+8x8 micro-tile layout. If the menu looks like shuffled blocks, the game also uses macro tiling - send a photo so the layout can be mapped.
+The plugin shows one notification when it loads and no other notifications.
