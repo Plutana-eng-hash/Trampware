@@ -1,7 +1,8 @@
 // Trampware - black/white in-game overlay menu for GoldHEN.
 //
-// Open / close:  press L3 + R3 (toggle).  CIRCLE also closes.  (Controls tab can switch to L1 + R1 + OPTIONS)
-// Navigate:      D-Pad UP/DOWN select, LEFT/RIGHT adjust, CROSS toggle/activate, L1/R1 switch tab, CIRCLE close
+// Open / close:  press L3 + R3 (toggle).  CIRCLE (O) closes the menu from anywhere.  (Controls tab can switch to L1 + R1 + OPTIONS)
+// Navigate:      D-Pad UP/DOWN move, LEFT/RIGHT adjust, CROSS (X) enter / click / open, TRIANGLE back to categories,
+//                L1/R1 switch tab, SQUARE reset the selected option
 //
 // The menu is software-rendered (render.c) on a background render thread and composited onto the game's
 // video-out buffers by a background draw thread, so neither the controller nor the game thread ever waits on it.
@@ -53,6 +54,7 @@ HOOK_INIT(sceGnmSubmitAndFlipCommandBuffers);
 s32 sceGnmSubmitAndFlipCommandBuffers(u32 count, void* dcbGpuAddrs[], u32* dcbSizesInBytes, void* ccbGpuAddrs[],
                                       u32* ccbSizesInBytes, u32 videoOutHandle, u32 displayBufferIndex, u32 flipMode, s64 flipArg);
 static volatile bool g_gnmSeen;   // once the Gnm flip path is seen, the VideoOut hook stops drawing
+int scePthreadSetprio();   // (thread, prio): lower number = higher priority
 static volatile s32 g_prevIdx = -1;
 
 // The stock scePadRead / scePadReadState are tiny stubs that tail-call scePadReadExt / scePadReadStateExt.
@@ -98,8 +100,10 @@ typedef struct {
     int x, y, alpha;
     // Pre-converted pixel list for the front canvas: framebuffer dword index + final colour. Drawing is then a plain
     // store per pixel (no blending, no reads), so it can be repeated every millisecond without any side effects.
-    u32 *idx, *col;
+    u32 *idx, *col;     // list the draw thread reads (only swapped while holding g_cvLock)
     int n, cap;
+    u32 *nidx, *ncol;   // spare list the render thread builds into WITHOUT holding the lock
+    int ncap;
     u32 geo;            // framebuffer geometry version the list was built for
 } Layer;
 static Layer g_layer[L_COUNT];
@@ -217,6 +221,7 @@ static void activate(TwOpt* o) {
 static void set_open(bool open) {
     if (g_open == open) return;
     g_open = open;
+    g_menu.focus = 0;   // always start on the category list
     if (open) OPT(TW_TAB_VISUALS, V_ENABLED).v = 1;
     else g_saveReq = true;   // written by the render thread, so closing is instant
     g_dirty = true;
@@ -247,28 +252,44 @@ static bool menu_input(u32 btn) {
     u64 t = now_ms();
     TwOpt* cur = &g_menu.opts[g_menu.tab][g_menu.selected];
 
+    // L1 / R1 still jump between tabs from anywhere
     if (p & SCE_PAD_BUTTON_L1) { g_menu.tab = (g_menu.tab + TW_TAB_COUNT - 1) % TW_TAB_COUNT; g_menu.selected = 0; g_dirty = true; }
     if (p & SCE_PAD_BUTTON_R1) { g_menu.tab = (g_menu.tab + 1) % TW_TAB_COUNT; g_menu.selected = 0; g_dirty = true; }
-    if (p & SCE_PAD_BUTTON_CIRCLE) set_open(false);
-    if (p & SCE_PAD_BUTTON_CROSS) activate(cur);
-    if ((p & SCE_PAD_BUTTON_SQUARE) && cur->type != TW_ACTION) {   // SQUARE = reset the selected option
-        cur->v = cur->def; sync_look(); g_dirty = true; toast("Reset to default");
+    cur = &g_menu.opts[g_menu.tab][g_menu.selected];   // tab may have just changed
+
+    // O (CIRCLE) closes the menu from anywhere. The press is kept from the game until it is released.
+    if (p & SCE_PAD_BUTTON_CIRCLE) {
+        set_open(false);
+        g_swallow = btn;
+        return true;
     }
 
-    // d-pad with key repeat (navigation speed 1..10)
-    u32 dirs = b & (SCE_PAD_BUTTON_UP | SCE_PAD_BUTTON_DOWN | SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT);
-    bool fire = false;
-    if (p & (SCE_PAD_BUTTON_UP | SCE_PAD_BUTTON_DOWN | SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT)) { fire = true; g_nextRepeat = t + 350; }
-    else if (dirs && t >= g_nextRepeat) { fire = true; g_nextRepeat = t + (u64)(240 - OPT(TW_TAB_CONTROLS, C_SPEED).v * 20); }
-    if (fire) {
-        int n = g_menu.count[g_menu.tab];
-        if (dirs & SCE_PAD_BUTTON_UP) { g_menu.selected = (g_menu.selected + n - 1) % n; g_dirty = true; }
-        else if (dirs & SCE_PAD_BUTTON_DOWN) { g_menu.selected = (g_menu.selected + 1) % n; g_dirty = true; }
-        else if (dirs & (SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT)) {
-            int dir = (dirs & SCE_PAD_BUTTON_RIGHT) ? 1 : -1;
-            TwOpt* o = &g_menu.opts[g_menu.tab][g_menu.selected];
-            if (o->type == TW_TOGGLE) { if (p & (SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT)) change(o, 0, true); }
-            else change(o, dir, false);
+    if (g_menu.focus == 0) {
+        // ---- category list: D-Pad moves between categories, X opens the category
+        if (p & SCE_PAD_BUTTON_UP)   { g_menu.tab = (g_menu.tab + TW_TAB_COUNT - 1) % TW_TAB_COUNT; g_menu.selected = 0; g_dirty = true; }
+        if (p & SCE_PAD_BUTTON_DOWN) { g_menu.tab = (g_menu.tab + 1) % TW_TAB_COUNT; g_menu.selected = 0; g_dirty = true; }
+        if (p & (SCE_PAD_BUTTON_CROSS | SCE_PAD_BUTTON_RIGHT)) { g_menu.focus = 1; g_menu.selected = 0; g_dirty = true; }
+    } else {
+        // ---- options: D-Pad moves (hold to repeat), LEFT/RIGHT adjusts, X enters / clicks, TRIANGLE goes back
+        if (p & SCE_PAD_BUTTON_TRIANGLE) { g_menu.focus = 0; g_dirty = true; }
+        if (p & SCE_PAD_BUTTON_CROSS) activate(cur);
+        if ((p & SCE_PAD_BUTTON_SQUARE) && cur->type != TW_ACTION) {   // SQUARE = reset the selected option
+            cur->v = cur->def; sync_look(); g_dirty = true; toast("Reset to default");
+        }
+        u32 dirs = b & (SCE_PAD_BUTTON_UP | SCE_PAD_BUTTON_DOWN | SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT);
+        bool fire = false;
+        if (p & (SCE_PAD_BUTTON_UP | SCE_PAD_BUTTON_DOWN | SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT)) { fire = true; g_nextRepeat = t + 350; }
+        else if (dirs && t >= g_nextRepeat) { fire = true; g_nextRepeat = t + (u64)(240 - OPT(TW_TAB_CONTROLS, C_SPEED).v * 20); }
+        if (fire) {
+            int n = g_menu.count[g_menu.tab];
+            if (dirs & SCE_PAD_BUTTON_UP) { g_menu.selected = (g_menu.selected + n - 1) % n; g_dirty = true; }
+            else if (dirs & SCE_PAD_BUTTON_DOWN) { g_menu.selected = (g_menu.selected + 1) % n; g_dirty = true; }
+            else if (dirs & (SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT)) {
+                int dir = (dirs & SCE_PAD_BUTTON_RIGHT) ? 1 : -1;
+                TwOpt* o = &g_menu.opts[g_menu.tab][g_menu.selected];
+                if (o->type == TW_TOGGLE) { if (p & (SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT)) change(o, 0, true); }
+                else change(o, dir, false);
+            }
         }
     }
     return OPT(TW_TAB_CONTROLS, C_BLOCK).v != 0;
@@ -341,39 +362,40 @@ static bool fb_supported(void) {
 // ---- layer publishing (render thread -> draw thread)
 // Convert the front canvas to a flat list of (framebuffer index, colour). Pixels that are mostly transparent are skipped,
 // the rest are stored fully opaque, so the menu and watermark are always drawn at full strength.
-static void layer_build(Layer* L) {
+// Build the pixel list of the front canvas into the spare list. Runs on the render thread WITHOUT the canvas lock, so
+// the draw thread is never kept waiting while a menu list is being prepared (that waiting was what made the overlay drop
+// out for a moment on every option change).
+static int layer_build(Layer* L, const FbAttr a, int x, int y) {
     const TwCanvas* c = &L->cv[L->front];
-    const int W = (int)g_fbAttr.width, H = (int)g_fbAttr.height;
-    const int pitch = g_fbAttr.pitch ? (int)g_fbAttr.pitch : W;
-    const bool swapRB = (g_fbAttr.format == FB_FMT_A8B8G8R8);
-    L->n = 0;
-    L->geo = g_geo;
-    if (!c->px) return;
+    const int W = (int)a.width, H = (int)a.height;
+    const int pitch = a.pitch ? (int)a.pitch : W;
+    const bool swapRB = (a.format == FB_FMT_A8B8G8R8);
+    if (!c->px) return 0;
     const int need = c->w * c->h;
-    if (need > L->cap) {
-        free(L->idx); free(L->col);
-        L->idx = (u32*)malloc((size_t)need * 4);
-        L->col = (u32*)malloc((size_t)need * 4);
-        L->cap = (L->idx && L->col) ? need : 0;
-        if (!L->cap) return;
+    if (need > L->ncap) {
+        free(L->nidx); free(L->ncol);
+        L->nidx = (u32*)malloc((size_t)need * 4);
+        L->ncol = (u32*)malloc((size_t)need * 4);
+        L->ncap = (L->nidx && L->ncol) ? need : 0;
+        if (!L->ncap) return 0;
     }
     int n = 0;
     for (int j = 0; j < c->h; j++) {
-        const int y = L->y + j;
-        if (y < 0 || y >= H) continue;
+        const int yy = y + j;
+        if (yy < 0 || yy >= H) continue;
         for (int i = 0; i < c->w; i++) {
             const u32 s = c->px[(size_t)j * c->w + i];
-            if ((s >> 24) < 96) continue;
-            const int x = L->x + i;
-            if (x < 0 || x >= W) continue;
+            if ((s >> 24) < 96) continue;          // mostly transparent: skip (menu pixels are stored fully opaque)
+            const int xx = x + i;
+            if (xx < 0 || xx >= W) continue;
             u32 r = (s >> 16) & 255, g = (s >> 8) & 255, b = s & 255;
             if (swapRB) { u32 t = r; r = b; b = t; }
-            L->idx[n] = (u32)fb_index(x, y, pitch);
-            L->col[n] = 0xFF000000u | (r << 16) | (g << 8) | b;
+            L->nidx[n] = (u32)fb_index(xx, yy, pitch);
+            L->ncol[n] = 0xFF000000u | (r << 16) | (g << 8) | b;
             n++;
         }
     }
-    L->n = n;
+    return n;
 }
 
 // Make `li` show the given state. swap = the back canvas was just rendered and becomes the front one.
@@ -381,11 +403,24 @@ static void layer_publish(int li, bool vis, int x, int y, bool swap) {
     Layer* L = &g_layer[li];
     if (!swap && L->visible == vis && L->x == x && L->y == y && L->geo == g_geo) return;
     if (!fb_supported()) return;    // primes the tiling globals used by layer_build
-    cvlock();
     if (swap) L->front ^= 1;
-    L->visible = vis && L->cv[L->front].px != NULL;
+    const bool show = vis && L->cv[L->front].px != NULL;
+    const FbAttr a = g_fbAttr;      // a torn read is harmless: a geometry change bumps g_geo and the list is rebuilt
+    const u32 geo = g_geo;
+    const int n = show ? layer_build(L, a, x, y) : 0;
+    cvlock();
+    L->visible = show;
     L->x = x; L->y = y;
-    if (L->visible) layer_build(L);
+    if (show && n > 0) {
+        u32 *ti = L->idx, *tc = L->col;
+        L->idx = L->nidx; L->col = L->ncol; L->nidx = ti; L->ncol = tc;
+        int tcap = L->cap; L->cap = L->ncap; L->ncap = tcap;
+        L->n = n;
+        L->geo = geo;
+    } else if (show) {
+        L->n = 0;
+        L->geo = geo;
+    }
     cvunlock();
 }
 
@@ -413,11 +448,17 @@ static void service_buffer(int idx) {
 static void* draw_thread(void* arg) {
     (void)arg;
     while (g_run) {
-        sceKernelUsleep(300);
+        sceKernelUsleep(100);
         if (!g_ready || !g_fbKnown || !fb_supported()) continue;
+        // the two buffers that matter right now (on screen / about to be shown) are stamped first and twice as often
+        const s32 cur = g_curIdx, prev = g_prevIdx;
+        static int pass;
         cvlock();
-        for (int i = 0; i < MAX_FB; i++)
-            if (g_fb[i].addr) draw_buffer(i);
+        if (prev >= 0 && prev < MAX_FB && g_fb[prev].addr) draw_buffer(prev);
+        if (cur >= 0 && cur < MAX_FB && cur != prev && g_fb[cur].addr) draw_buffer(cur);
+        if ((++pass & 7) == 0)   // the other buffers are not on screen; touching them rarely keeps the CPU free
+            for (int i = 0; i < MAX_FB; i++)
+                if (g_fb[i].addr && i != cur && i != prev) draw_buffer(i);
         cvunlock();
     }
     scePthreadExit(NULL);
@@ -619,7 +660,7 @@ s32 attr_public plugin_load(s32 argc, const char* argv[]) {
     g_run = true;
     g_fpsT0 = now_ms();
     if (scePthreadCreate(&g_thRender, NULL, render_thread, NULL, "trampware_render") == 0 &&
-        scePthreadCreate(&g_thDraw, NULL, draw_thread, NULL, "trampware_draw") == 0) g_threadsOn = true;
+        scePthreadCreate(&g_thDraw, NULL, draw_thread, NULL, "trampware_draw") == 0) { g_threadsOn = true; scePthreadSetprio(g_thDraw, 400); }
     else { g_run = false; final_printf("[trampware] could not start the overlay threads\n"); }
     HOOK32(scePadRead);
     HOOK32(scePadReadState);
@@ -650,7 +691,7 @@ s32 attr_public plugin_unload(s32 argc, const char* argv[]) {
     UNHOOK(sceVideoOutSubmitFlip);
     UNHOOK(sceGnmSubmitAndFlipCommandBuffers);
     save_config(&g_menu);
-    for (int i = 0; i < L_COUNT; i++) { tw_canvas_free(&g_layer[i].cv[0]); tw_canvas_free(&g_layer[i].cv[1]); free(g_layer[i].idx); free(g_layer[i].col); }
+    for (int i = 0; i < L_COUNT; i++) { tw_canvas_free(&g_layer[i].cv[0]); tw_canvas_free(&g_layer[i].cv[1]); free(g_layer[i].idx); free(g_layer[i].col); free(g_layer[i].nidx); free(g_layer[i].ncol); }
     return 0;
 }
 

@@ -29,6 +29,7 @@ typedef struct {
     int compact;          // 1 = compact rows
     int accent;           // 50..100
     int hints;            // show footer key hints
+    int focus;            // 0 = category list has focus, 1 = options have focus
     const char* footer;   // footer left text
 } TwMenu;
 

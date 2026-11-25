@@ -247,8 +247,10 @@ void tw_draw_menu(TwCanvas* c, const TwMenu* m, float sc) {
     for (int i = 0; i < TW_TAB_COUNT; i++) {
         float x = P(17), y = P(92 + i * 51.5f), w = P(186), h = P(47);
         bool act = (i == m->tab);
-        uint32_t fg = act ? RGB(8, 8, 8) : RGB(136, 136, 136);
-        if (act) rrect(c, x, y, w, h, F(4), (acc >= 250) ? RGB(240, 240, 240) : GRAY((acc * 240) / 255), 0, 0);
+        bool foc = act && m->focus == 0;   // category list has focus: bright white block; otherwise a dim marker
+        uint32_t fg = foc ? RGB(8, 8, 8) : (act ? RGB(244, 244, 244) : RGB(136, 136, 136));
+        if (foc) rrect(c, x, y, w, h, F(4), (acc >= 250) ? RGB(240, 240, 240) : GRAY((acc * 240) / 255), 0, 0);
+        else if (act) rrect(c, x, y, w, h, F(4), RGB(30, 30, 30), RGB(70, 70, 70), 1);
         icon(c, i, x + F(12 + 10), y + h * 0.5f, sc, fg);
         text(c, x + F(12 + 20 + 11), y + h * 0.5f, F(14), act, 0, fg, tabs[i], 0, 0);
     }
@@ -286,7 +288,7 @@ void tw_draw_menu(TwCanvas* c, const TwMenu* m, float sc) {
     for (int i = 0; i < m->count[m->tab]; i++) {
         const TwOpt* o = &m->opts[m->tab][i];
         float ry = P(157 + i * (rowh + 2)), rh = P(rowh);
-        bool sel = (i == m->selected);
+        bool sel = (i == m->selected) && m->focus == 1;
         if (sel) {
             rrect(c, mx, ry, mr - mx, rh, F(4), RGB(20, 20, 20), RGB(58, 58, 58), 1);
             rrect(c, mx, ry + F(10), F(2), rh - F(20), 0, ACC, 0, 0);
@@ -329,13 +331,17 @@ void tw_draw_menu(TwCanvas* c, const TwMenu* m, float sc) {
     float fcy = fy + P(13) + F(8.25f);
     text(c, mx, fcy, F(11), 0, 0, RGB(94, 94, 94), m->footer, 0, 0);
     if (m->hints) {
-        // right aligned: [UP/DOWN] select  [LEFT/RIGHT] adjust  [X] toggle  [L1/R1] tab
-        static const char* keys[5] = {"UP/DOWN", "LEFT/RIGHT", "X", "L1/R1", "O"};
-        static const char* what[5] = {" select  ", " adjust  ", " toggle  ", " tab  ", " close"};
+        static const char* keysA[3] = {"UP/DOWN", "X", "O"};
+        static const char* whatA[3] = {" move  ", " open  ", " close"};
+        static const char* keysB[5] = {"UP/DOWN", "LEFT/RIGHT", "X", "TRIANGLE", "O"};
+        static const char* whatB[5] = {" move  ", " adjust  ", " select  ", " back  ", " close"};
+        const int nk = m->focus ? 5 : 3;
+        const char** keys = m->focus ? keysB : keysA;
+        const char** what = m->focus ? whatB : whatA;
         float total = 0;
-        for (int k = 0; k < 5; k++) total += text_w(keys[k], F(11), 0, 0) + P(12) + 2 + text_w(what[k], F(11), 0, 0);
+        for (int k = 0; k < nk; k++) total += text_w(keys[k], F(11), 0, 0) + P(12) + 2 + text_w(what[k], F(11), 0, 0);
         float x = mr - total;
-        for (int k = 0; k < 5; k++) {
+        for (int k = 0; k < nk; k++) {
             float kw = text_w(keys[k], F(11), 0, 0) + P(12) + 2;
             rrect(c, x, fcy - F(9.5f), kw, F(19), F(3), 0, RGB(51, 51, 51), 1);
             text(c, x + kw * 0.5f, fcy, F(11), 0, 0, RGB(170, 170, 170), keys[k], 2, 0);
