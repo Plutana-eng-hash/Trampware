@@ -28,7 +28,7 @@
 attr_public const char* g_pluginName = "trampware";
 attr_public const char* g_pluginDesc = "Trampware black/white overlay menu";
 attr_public const char* g_pluginAuth = "Trampware";
-attr_public u32 g_pluginVersion = 0x00000220;  // 2.20
+attr_public u32 g_pluginVersion = 0x00000230;  // 2.30
 
 #define CONFIG_PATH GOLDHEN_PATH "/trampware.ini"
 #define COMBO_L3R3 (SCE_PAD_BUTTON_L3 | SCE_PAD_BUTTON_R3)
@@ -369,9 +369,12 @@ s32 scePadSetVibration_hook(s32 handle, const ScePadVibrationParam* param) {
 // FPS unlocker: games ask for a frame-rate cap with sceVideoOutSetFlipRate. With the option on, the request is dropped
 // and the game runs uncapped. The plugin loads before the game starts, so it sees the game's startup request.
 // Restart the game after changing the option, because the cap is only set when the game asks for it.
+// The hook is only installed when the option is on at startup, and it never calls the original (same as fliprate_remover).
+// Calling the original through the hook trampoline crashed the game (CE-36329-3) even with the option off.
+static bool g_fpsHooked;
 s32 sceVideoOutSetFlipRate_hook(s32 handle, s32 fliprate) {
-    if (g_ready && OPT(TW_TAB_SYSTEM, S_FPS_UNLOCK).v) return 0;
-    return HOOK_CONTINUE(sceVideoOutSetFlipRate, s32 (*)(s32, s32), handle, fliprate);
+    (void)handle; (void)fliprate;
+    return 0;
 }
 
 // ------------------------------------------------------------------ compositing
@@ -715,7 +718,9 @@ s32 attr_public plugin_load(s32 argc, const char* argv[]) {
     HOOK32(sceVideoOutRegisterBuffers);
     HOOK32(sceVideoOutSubmitFlip);
     HOOK32(sceGnmSubmitAndFlipCommandBuffers);
-    HOOK32(sceVideoOutSetFlipRate);
+
+    // FPS unlocker: only hooked when it is on at startup (the setting takes effect on the next game launch)
+    if (OPT(TW_TAB_SYSTEM, S_FPS_UNLOCK).v) { HOOK32(sceVideoOutSetFlipRate); g_fpsHooked = true; }
 
     if (OPT(TW_TAB_SYSTEM, S_NOTIFY).v) {
         char msg[128];
@@ -738,7 +743,7 @@ s32 attr_public plugin_unload(s32 argc, const char* argv[]) {
     UNHOOK(sceVideoOutRegisterBuffers);
     UNHOOK(sceVideoOutSubmitFlip);
     UNHOOK(sceGnmSubmitAndFlipCommandBuffers);
-    UNHOOK(sceVideoOutSetFlipRate);
+    if (g_fpsHooked) { UNHOOK(sceVideoOutSetFlipRate); g_fpsHooked = false; }
     save_config(&g_menu);
     for (int i = 0; i < L_COUNT; i++) { tw_canvas_free(&g_layer[i].cv[0]); tw_canvas_free(&g_layer[i].cv[1]); free(g_layer[i].idx); free(g_layer[i].col); free(g_layer[i].nidx); free(g_layer[i].ncol); }
     return 0;
