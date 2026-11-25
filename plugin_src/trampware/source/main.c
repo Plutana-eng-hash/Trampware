@@ -28,7 +28,7 @@
 attr_public const char* g_pluginName = "trampware";
 attr_public const char* g_pluginDesc = "Trampware black/white overlay menu";
 attr_public const char* g_pluginAuth = "Trampware";
-attr_public u32 g_pluginVersion = 0x00000210;  // 2.10
+attr_public u32 g_pluginVersion = 0x00000220;  // 2.20
 
 #define CONFIG_PATH GOLDHEN_PATH "/trampware.ini"
 #define COMBO_L3R3 (SCE_PAD_BUTTON_L3 | SCE_PAD_BUTTON_R3)
@@ -244,6 +244,9 @@ static void set_open(bool open) {
 // Handles one pad sample. Returns true if the sample should be hidden from the game.
 static u32 g_prevBtn, g_swallow;
 static bool g_comboHeld;   // was the open combo fully held on the previous sample
+static u64 g_comboMs;      // time of the last open/close toggle (cooldown)
+static u64 g_lastTs;       // timestamp of the newest pad sample already handled
+static u32 g_lastSampleBtn;
 static u64 g_nextRepeat;
 
 static bool menu_input(u32 btn) {
@@ -257,7 +260,9 @@ static bool menu_input(u32 btn) {
     const bool comboHeld = (btn & oc) == oc;
     const bool combo = comboHeld && !g_comboHeld;
     g_comboHeld = comboHeld;
-    if (combo) {
+    const u64 tnow = now_ms();
+    if (combo && tnow - g_comboMs >= 300) {
+        g_comboMs = tnow;
         set_open(!g_open);
         g_swallow = btn;   // ignore everything held right now until it is released
         return true;
@@ -319,14 +324,27 @@ static void hide_from_game(ScePadData* d) {
     memset(&d->analogButtons, 0, sizeof(d->analogButtons));
 }
 
+// Games often call scePadRead AND scePadReadState for the same pad, so the same sample can reach us twice. Each sample is
+// run through the menu logic exactly once (by timestamp); a repeat is only hidden, never processed again. Without this,
+// the open/close toggle and the navigation edges flip back and forth between the two readers.
 static void process_pad(ScePadData* data, int count) {
     for (int i = count - 1; i >= 0; i--) {   // oldest sample first
+        const u64 ts = data[i].timestamp;
+        const u32 btn = data[i].buttons;
         lock();
-        bool hide = menu_input(data[i].buttons);
-        bool open = g_open;
+        if (ts != 0 && g_lastTs > ts + 5000000ull) g_lastTs = 0;   // timestamps restarted (pad reconnect): start over
+        const bool repeat = ts != 0 && (ts < g_lastTs || (ts == g_lastTs && btn == g_lastSampleBtn));
+        bool hide;
+        if (!repeat) {
+            if (ts != 0) { g_lastTs = ts; g_lastSampleBtn = btn; }
+            hide = menu_input(btn);
+        } else {
+            hide = g_open && OPT(TW_TAB_CONTROLS, C_BLOCK).v;
+        }
+        const bool open = g_open;
         unlock();
         // never leak the open/close combo to the game, and hide everything while the menu has focus
-        if (hide || (data[i].buttons & OPEN_COMBO) == OPEN_COMBO) hide_from_game(&data[i]);
+        if (hide || (btn & OPEN_COMBO) == OPEN_COMBO) hide_from_game(&data[i]);
         else if (open && OPT(TW_TAB_CONTROLS, C_BLOCK).v) hide_from_game(&data[i]);
     }
 }

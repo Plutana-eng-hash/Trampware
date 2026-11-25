@@ -31,3 +31,6 @@ HUD > **Override V-Sync** turns the override on. **V-Sync** then forces the flip
 
 ## FPS unlocker
 System > **FPS unlocker** drops the game's frame-rate cap (`sceVideoOutSetFlipRate`), the same approach as the `fliprate_remover` plugin in this repo. Restart the game after changing it. Some games use a fixed time step and run too fast or break when uncapped; turn it off for those.
+
+## Input handling
+The game can read the pad with `scePadRead` and `scePadReadState` at the same time. Trampware handles each pad sample once, using the sample's timestamp, so the L3 + R3 toggle and the menu buttons cannot fire twice for one press. The open/close toggle also has a 300 ms cooldown.
