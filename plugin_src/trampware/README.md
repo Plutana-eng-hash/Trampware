@@ -2,13 +2,13 @@
 
 Black / white in-game overlay menu for GoldHEN (`trampware.prx`).
 
-- **Open:** press `L3 + R3` together (Controls tab can switch this to `L1 + R1 + OPTIONS`). **Close:** `O` (Circle) from anywhere, or `L3 + R3` again
+- **Open:** press `L3 + R3` together and hold or press once; it opens one time and each new press toggles it. (Controls tab can switch this to `L1 + R1 + OPTIONS`). **Close:** `O` (Circle) from anywhere, or press `L3 + R3` again
 - **Categories:** D-Pad up/down moves between categories, `X` (or right) opens one, `O` closes the menu
 - **Options:** D-Pad up/down moves between options, left/right adjusts sliders and toggles, `X` enters / clicks the option, `TRIANGLE` goes back to the categories, `O` closes the menu
 - **L1 / R1** switch tabs from anywhere, `SQUARE` resets the selected option to its default
 - **Settings file:** `/data/GoldHEN/trampware.ini` (written when the menu closes)
 
-Tabs: Visuals (opacity, scale, accent, compact layout), HUD (status panel with FPS, crosshair, HUD scale),
+Tabs: Visuals (opacity, scale, accent, compact layout), HUD (status panel with FPS, crosshair, HUD scale, V-Sync override and V-Sync on/off),
 Controls (block game input while open, allow/deny vibration, navigation speed, button hints), System (logging, safe mode, reset, about).
 
 The menu is software-rendered (`source/render.c`, no SDK dependencies) on a background render thread and composited
@@ -25,3 +25,6 @@ Most games use tiled framebuffers. The plugin draws on them with the PS4 2D-thin
 probe pattern taken on real hardware. **System > Draw on tiled games** (on by default) switches this on; turn it off
 if a game ever shows glitched blocks. `test/tile_test.c` checks the address mapping on the host.
 The plugin shows one notification when it loads and no other notifications.
+
+## V-Sync
+HUD > **Override V-Sync** turns the override on. **V-Sync** then forces the flip mode to on or off for every frame the game presents. With the override off, the game's own choice is used. The two flip-mode numbers are `FLIP_MODE_VSYNC_ON` and `FLIP_MODE_VSYNC_OFF` at the top of `source/main.c`; check them on console and change them there if V-Sync does not switch.

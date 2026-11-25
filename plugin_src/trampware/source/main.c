@@ -28,18 +28,23 @@
 attr_public const char* g_pluginName = "trampware";
 attr_public const char* g_pluginDesc = "Trampware black/white overlay menu";
 attr_public const char* g_pluginAuth = "Trampware";
-attr_public u32 g_pluginVersion = 0x00000100;  // 1.00
+attr_public u32 g_pluginVersion = 0x00000200;  // 2.00
 
 #define CONFIG_PATH GOLDHEN_PATH "/trampware.ini"
 #define COMBO_L3R3 (SCE_PAD_BUTTON_L3 | SCE_PAD_BUTTON_R3)
 #define COMBO_ALT  (SCE_PAD_BUTTON_L1 | SCE_PAD_BUTTON_R1 | SCE_PAD_BUTTON_OPTIONS)
 #define OPEN_COMBO open_combo()
+// Flip modes passed to sceVideoOutSubmitFlip / sceGnmSubmitAndFlipCommandBuffers when the V-Sync override is on.
+// 1 = wait for vertical blank (V-Sync on), 0 = flip immediately (V-Sync off). These are the values this build assumes;
+// if V-Sync does not change on the console, these two numbers are the ones to edit.
+#define FLIP_MODE_VSYNC_ON  1
+#define FLIP_MODE_VSYNC_OFF 0
 #define NAV_MASK (SCE_PAD_BUTTON_UP | SCE_PAD_BUTTON_DOWN | SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT | \
                   SCE_PAD_BUTTON_CROSS | SCE_PAD_BUTTON_CIRCLE | SCE_PAD_BUTTON_L1 | SCE_PAD_BUTTON_R1)
 
 // Option indices (see kDefaults in render.c)
 enum { V_ENABLED, V_COMPACT, V_OPACITY, V_SCALE, V_ACCENT };
-enum { H_ENABLED, H_CROSSHAIR, H_STATUS, H_SCALE };
+enum { H_ENABLED, H_CROSSHAIR, H_STATUS, H_SCALE, H_VSYNC_OVERRIDE, H_VSYNC };
 enum { C_BLOCK, C_VIBRATION, C_SPEED, C_HINTS, C_TRIGGER };
 enum { S_LOGGING, S_TILED, S_NOTIFY, S_RESET, S_ABOUT };
 
@@ -110,6 +115,7 @@ static Layer g_layer[L_COUNT];
 
 static volatile u32 g_geo = 1;              // bumped when the framebuffers are (re)registered
 static volatile s32 g_curIdx = -1;          // buffer submitted last (still being rendered / about to be shown)
+static volatile u64 g_curMs;                // when g_curIdx was submitted (used to let the Gnm path finish drawing)
 
 static OrbisPthread g_thRender, g_thDraw;
 static bool g_threadsOn;
@@ -137,6 +143,12 @@ static u64 now_ms(void) {
 #define OPT(tab, i) (g_menu.opts[tab][i])
 // Open/close combo: L3 + R3 (default) or L1 + R1 + OPTIONS
 static u32 open_combo(void) { return OPT(TW_TAB_CONTROLS, C_TRIGGER).v ? COMBO_L3R3 : COMBO_ALT; }
+
+// Applies the V-Sync toggle (HUD tab) to the flip mode the game asks for. Override off = the game's own choice is kept.
+static u32 vsync_flip(u32 flipMode) {
+    if (!g_ready || !OPT(TW_TAB_HUD, H_VSYNC_OVERRIDE).v) return flipMode;
+    return OPT(TW_TAB_HUD, H_VSYNC).v ? FLIP_MODE_VSYNC_ON : FLIP_MODE_VSYNC_OFF;
+}
 
 static void toast(const char* text) {
     snprintf(g_toast, sizeof(g_toast), "%s", text);
@@ -230,15 +242,20 @@ static void set_open(bool open) {
 
 // Handles one pad sample. Returns true if the sample should be hidden from the game.
 static u32 g_prevBtn, g_swallow;
+static bool g_comboHeld;   // was the open combo fully held on the previous sample
 static u64 g_nextRepeat;
 
 static bool menu_input(u32 btn) {
     u32 pressed = btn & ~g_prevBtn;
     g_prevBtn = btn;
 
-    // Open/close: press L3 + R3 together (or L1+R1+OPTIONS if switched in Controls). CIRCLE (O) also closes.
+    // Open/close: L3 + R3 together (or L1+R1+OPTIONS if switched in Controls). The toggle fires on the sample where the
+    // whole combo becomes held, so it works whether the two sticks go down together or a moment apart, press-and-hold
+    // opens it once, and pressing the combo again toggles it. CIRCLE (O) also closes.
     const u32 oc = open_combo();
-    const bool combo = (btn & oc) == oc && (pressed & oc);
+    const bool comboHeld = (btn & oc) == oc;
+    const bool combo = comboHeld && !g_comboHeld;
+    g_comboHeld = comboHeld;
     if (combo) {
         set_open(!g_open);
         g_swallow = btn;   // ignore everything held right now until it is released
@@ -452,10 +469,11 @@ static void* draw_thread(void* arg) {
         if (!g_ready || !g_fbKnown || !fb_supported()) continue;
         // the two buffers that matter right now (on screen / about to be shown) are stamped first and twice as often
         const s32 cur = g_curIdx, prev = g_prevIdx;
+        const bool curSettled = !g_gnmSeen || (now_ms() - g_curMs) >= 6;
         static int pass;
         cvlock();
         if (prev >= 0 && prev < MAX_FB && g_fb[prev].addr) draw_buffer(prev);
-        if (cur >= 0 && cur < MAX_FB && cur != prev && g_fb[cur].addr) draw_buffer(cur);
+        if (curSettled && cur >= 0 && cur < MAX_FB && cur != prev && g_fb[cur].addr) draw_buffer(cur);
         if ((++pass & 7) == 0)   // the other buffers are not on screen; touching them rarely keeps the CPU free
             for (int i = 0; i < MAX_FB; i++)
                 if (g_fb[i].addr && i != cur && i != prev) draw_buffer(i);
@@ -604,9 +622,10 @@ s32 sceVideoOutSubmitFlip_hook(s32 handle, s32 bufferIndex, u32 flipMode, s64 fl
         fps_tick();
         g_prevIdx = g_curIdx;
         g_curIdx = bufferIndex;
+        g_curMs = now_ms();
         if (g_ready && g_fbKnown) service_buffer(bufferIndex);
     }
-    return HOOK_CONTINUE(sceVideoOutSubmitFlip, s32 (*)(s32, s32, u32, s64), handle, bufferIndex, flipMode, flipArg);
+    return HOOK_CONTINUE(sceVideoOutSubmitFlip, s32 (*)(s32, s32, u32, s64), handle, bufferIndex, vsync_flip(flipMode), flipArg);
 }
 
 // Gnm path: the GPU is still rendering the submitted buffer, so only note which buffers are in flight. The draw thread
@@ -617,9 +636,10 @@ s32 sceGnmSubmitAndFlipCommandBuffers_hook(u32 count, void* dcbGpuAddrs[], u32* 
     fps_tick();
     g_prevIdx = g_curIdx;
     g_curIdx = (s32)displayBufferIndex;
+    g_curMs = now_ms();
     return HOOK_CONTINUE(sceGnmSubmitAndFlipCommandBuffers,
                          s32 (*)(u32, void**, u32*, void**, u32*, u32, u32, u32, s64),
-                         count, dcbGpuAddrs, dcbSizesInBytes, ccbGpuAddrs, ccbSizesInBytes, videoOutHandle, displayBufferIndex, flipMode, flipArg);
+                         count, dcbGpuAddrs, dcbSizesInBytes, ccbGpuAddrs, ccbSizesInBytes, videoOutHandle, displayBufferIndex, vsync_flip(flipMode), flipArg);
 }
 
 // ------------------------------------------------------------------ plugin entry points

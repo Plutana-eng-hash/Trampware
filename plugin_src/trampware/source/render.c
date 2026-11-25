@@ -145,6 +145,8 @@ static const TwOpt kDefaults[TW_TAB_COUNT][TW_MAX_OPTS] = {
         {"Crosshair", "Show center reticle", TW_TOGGLE, 0, 0, 1, 0, "", ""},
         {"Status panel", "Show FPS and title information", TW_TOGGLE, 1, 0, 1, 1, "", ""},
         {"HUD scale", "Size of HUD elements", TW_SLIDER, 100, 60, 140, 100, "%", ""},
+        {"Override V-Sync", "Off = the game decides. On = use the V-Sync setting below", TW_TOGGLE, 0, 0, 1, 0, "", ""},
+        {"V-Sync", "On = wait for the screen refresh (no tearing). Off = flip immediately", TW_TOGGLE, 1, 0, 1, 1, "", ""},
     },
     /* Controls */ {
         {"Controller input", "Block game input while the menu is open", TW_TOGGLE, 1, 0, 1, 1, "", ""},
@@ -161,7 +163,7 @@ static const TwOpt kDefaults[TW_TAB_COUNT][TW_MAX_OPTS] = {
         {"About Trampware", "Black / white menu", TW_ACTION, 0, 0, 0, 0, "", "Info"},
     },
 };
-static const int kCounts[TW_TAB_COUNT] = {5, 4, 5, 5};
+static const int kCounts[TW_TAB_COUNT] = {5, 6, 5, 5};
 
 void tw_menu_reset(TwMenu* m) {
     int tab = m->tab, sel = m->selected;
