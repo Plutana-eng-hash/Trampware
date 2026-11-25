@@ -9,7 +9,7 @@ Black / white in-game overlay menu for GoldHEN (`trampware.prx`).
 - **Settings file:** `/data/GoldHEN/trampware.ini` (written when the menu closes)
 
 Tabs: Visuals (opacity, scale, accent, compact layout), HUD (status panel with FPS, crosshair, HUD scale, V-Sync override and V-Sync on/off),
-Controls (block game input while open, allow/deny vibration, navigation speed, button hints), System (logging, safe mode, reset, about).
+Controls (block game input while open, allow/deny vibration, navigation speed, button hints), System (logging, FPS unlocker, reset, about).
 
 The menu is software-rendered (`source/render.c`, no SDK dependencies) on a background render thread and composited
 onto the game's video-out buffers by a background draw thread. Nothing heavy runs on the game or controller threads, so
@@ -28,3 +28,6 @@ The plugin shows one notification when it loads and no other notifications.
 
 ## V-Sync
 HUD > **Override V-Sync** turns the override on. **V-Sync** then forces the flip mode to on or off for every frame the game presents. With the override off, the game's own choice is used. The two flip-mode numbers are `FLIP_MODE_VSYNC_ON` and `FLIP_MODE_VSYNC_OFF` at the top of `source/main.c`; check them on console and change them there if V-Sync does not switch.
+
+## FPS unlocker
+System > **FPS unlocker** drops the game's frame-rate cap (`sceVideoOutSetFlipRate`), the same approach as the `fliprate_remover` plugin in this repo. Restart the game after changing it. Some games use a fixed time step and run too fast or break when uncapped; turn it off for those.

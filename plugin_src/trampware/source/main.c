@@ -28,7 +28,7 @@
 attr_public const char* g_pluginName = "trampware";
 attr_public const char* g_pluginDesc = "Trampware black/white overlay menu";
 attr_public const char* g_pluginAuth = "Trampware";
-attr_public u32 g_pluginVersion = 0x00000200;  // 2.00
+attr_public u32 g_pluginVersion = 0x00000210;  // 2.10
 
 #define CONFIG_PATH GOLDHEN_PATH "/trampware.ini"
 #define COMBO_L3R3 (SCE_PAD_BUTTON_L3 | SCE_PAD_BUTTON_R3)
@@ -46,7 +46,7 @@ attr_public u32 g_pluginVersion = 0x00000200;  // 2.00
 enum { V_ENABLED, V_COMPACT, V_OPACITY, V_SCALE, V_ACCENT };
 enum { H_ENABLED, H_CROSSHAIR, H_STATUS, H_SCALE, H_VSYNC_OVERRIDE, H_VSYNC };
 enum { C_BLOCK, C_VIBRATION, C_SPEED, C_HINTS, C_TRIGGER };
-enum { S_LOGGING, S_TILED, S_NOTIFY, S_RESET, S_ABOUT };
+enum { S_LOGGING, S_TILED, S_NOTIFY, S_FPS_UNLOCK, S_RESET, S_ABOUT };
 
 HOOK_INIT(scePadRead);
 HOOK_INIT(scePadReadState);
@@ -54,6 +54,7 @@ HOOK_INIT(scePadSetVibration);
 HOOK_INIT(sceVideoOutRegisterBuffers);
 HOOK_INIT(sceVideoOutSubmitFlip);
 HOOK_INIT(sceGnmSubmitAndFlipCommandBuffers);
+HOOK_INIT(sceVideoOutSetFlipRate);
 
 // Most PS4 games present through the graphics driver, not sceVideoOutSubmitFlip (same hook as frame_logger).
 s32 sceGnmSubmitAndFlipCommandBuffers(u32 count, void* dcbGpuAddrs[], u32* dcbSizesInBytes, void* ccbGpuAddrs[],
@@ -345,6 +346,14 @@ s32 scePadReadState_hook(s32 handle, ScePadData* data) {
 s32 scePadSetVibration_hook(s32 handle, const ScePadVibrationParam* param) {
     if (g_ready && !OPT(TW_TAB_CONTROLS, C_VIBRATION).v) return 0;
     return HOOK_CONTINUE(scePadSetVibration, s32 (*)(s32, const ScePadVibrationParam*), handle, param);
+}
+
+// FPS unlocker: games ask for a frame-rate cap with sceVideoOutSetFlipRate. With the option on, the request is dropped
+// and the game runs uncapped. The plugin loads before the game starts, so it sees the game's startup request.
+// Restart the game after changing the option, because the cap is only set when the game asks for it.
+s32 sceVideoOutSetFlipRate_hook(s32 handle, s32 fliprate) {
+    if (g_ready && OPT(TW_TAB_SYSTEM, S_FPS_UNLOCK).v) return 0;
+    return HOOK_CONTINUE(sceVideoOutSetFlipRate, s32 (*)(s32, s32), handle, fliprate);
 }
 
 // ------------------------------------------------------------------ compositing
@@ -688,6 +697,7 @@ s32 attr_public plugin_load(s32 argc, const char* argv[]) {
     HOOK32(sceVideoOutRegisterBuffers);
     HOOK32(sceVideoOutSubmitFlip);
     HOOK32(sceGnmSubmitAndFlipCommandBuffers);
+    HOOK32(sceVideoOutSetFlipRate);
 
     if (OPT(TW_TAB_SYSTEM, S_NOTIFY).v) {
         char msg[128];
@@ -710,6 +720,7 @@ s32 attr_public plugin_unload(s32 argc, const char* argv[]) {
     UNHOOK(sceVideoOutRegisterBuffers);
     UNHOOK(sceVideoOutSubmitFlip);
     UNHOOK(sceGnmSubmitAndFlipCommandBuffers);
+    UNHOOK(sceVideoOutSetFlipRate);
     save_config(&g_menu);
     for (int i = 0; i < L_COUNT; i++) { tw_canvas_free(&g_layer[i].cv[0]); tw_canvas_free(&g_layer[i].cv[1]); free(g_layer[i].idx); free(g_layer[i].col); free(g_layer[i].nidx); free(g_layer[i].ncol); }
     return 0;

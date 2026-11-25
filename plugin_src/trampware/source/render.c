@@ -159,11 +159,12 @@ static const TwOpt kDefaults[TW_TAB_COUNT][TW_MAX_OPTS] = {
         {"Logging", "Write plugin messages to the kernel log", TW_TOGGLE, 0, 0, 1, 0, "", ""},
         {"Draw on tiled games", "Needed for most games. Turn off if the screen glitches", TW_TOGGLE, 1, 0, 1, 1, "", ""},
         {"Load notification", "Show a message when the plugin loads", TW_TOGGLE, 1, 0, 1, 1, "", ""},
+        {"FPS unlocker", "Remove the game's frame rate cap. Restart the game after changing", TW_TOGGLE, 0, 0, 1, 0, "", ""},
         {"Reset settings", "Restore Trampware to defaults", TW_ACTION, 0, 0, 0, 0, "", "Reset"},
         {"About Trampware", "Black / white menu", TW_ACTION, 0, 0, 0, 0, "", "Info"},
     },
 };
-static const int kCounts[TW_TAB_COUNT] = {5, 6, 5, 5};
+static const int kCounts[TW_TAB_COUNT] = {5, 6, 5, 6};
 
 void tw_menu_reset(TwMenu* m) {
     int tab = m->tab, sel = m->selected;
