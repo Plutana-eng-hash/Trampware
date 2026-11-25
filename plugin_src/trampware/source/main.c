@@ -24,11 +24,12 @@
 #include "pad.h"
 #include "render.h"
 #include "tile.h"
+#include "tw_log.h"
 
 attr_public const char* g_pluginName = "trampware";
 attr_public const char* g_pluginDesc = "Trampware black/white overlay menu";
 attr_public const char* g_pluginAuth = "Trampware";
-attr_public u32 g_pluginVersion = 0x00000230;  // 2.30
+attr_public u32 g_pluginVersion = 0x00000250;  // 2.50
 
 #define CONFIG_PATH GOLDHEN_PATH "/trampware.ini"
 #define COMBO_L3R3 (SCE_PAD_BUTTON_L3 | SCE_PAD_BUTTON_R3)
@@ -46,7 +47,7 @@ attr_public u32 g_pluginVersion = 0x00000230;  // 2.30
 enum { V_ENABLED, V_COMPACT, V_OPACITY, V_SCALE, V_ACCENT };
 enum { H_ENABLED, H_CROSSHAIR, H_STATUS, H_SCALE, H_VSYNC_OVERRIDE, H_VSYNC };
 enum { C_BLOCK, C_VIBRATION, C_SPEED, C_HINTS, C_TRIGGER };
-enum { S_LOGGING, S_TILED, S_NOTIFY, S_FPS_UNLOCK, S_RESET, S_ABOUT };
+enum { S_LOGGING, S_TILED, S_NOTIFY, S_RESET, S_ABOUT };
 
 HOOK_INIT(scePadRead);
 HOOK_INIT(scePadReadState);
@@ -54,7 +55,6 @@ HOOK_INIT(scePadSetVibration);
 HOOK_INIT(sceVideoOutRegisterBuffers);
 HOOK_INIT(sceVideoOutSubmitFlip);
 HOOK_INIT(sceGnmSubmitAndFlipCommandBuffers);
-HOOK_INIT(sceVideoOutSetFlipRate);
 
 // Most PS4 games present through the graphics driver, not sceVideoOutSubmitFlip (same hook as frame_logger).
 s32 sceGnmSubmitAndFlipCommandBuffers(u32 count, void* dcbGpuAddrs[], u32* dcbSizesInBytes, void* ccbGpuAddrs[],
@@ -125,6 +125,10 @@ static bool g_threadsOn;
 static u64 g_fpsT0;
 static int g_fpsFrames;
 static volatile float g_fps;
+
+// counters for the log / heartbeat
+static volatile u32 g_padCalls, g_padProcessed, g_padDup, g_flipCalls, g_gnmCalls, g_stamps, g_oobSkips, g_fbRegs;
+static bool g_disabled;   // title is listed in disabled_titles.txt: Trampware does nothing except log
 
 // ------------------------------------------------------------------ helpers
 static u32 open_combo(void);   // defined after the options are available
@@ -215,6 +219,7 @@ static void change(TwOpt* o, int dir, bool announce) {
     }
     sync_look();
     g_dirty = true;
+    tw_logf("option %s = %d", o->label, o->v);
     if (o == &OPT(TW_TAB_VISUALS, V_ENABLED) && !o->v) set_open(false);   // hide the menu; the combo brings it back
 }
 
@@ -223,6 +228,7 @@ static void activate(TwOpt* o) {
     if (o->type != TW_ACTION) return;
     if (&OPT(TW_TAB_SYSTEM, S_RESET) == o) {
         tw_menu_reset(&g_menu);
+        tw_logf("all settings reset to defaults");
         sync_look();
         toast("Settings reset");
     } else {
@@ -238,7 +244,7 @@ static void set_open(bool open) {
     if (open) OPT(TW_TAB_VISUALS, V_ENABLED).v = 1;
     else g_saveReq = true;   // written by the render thread, so closing is instant
     g_dirty = true;
-    tw_log("menu %s\n", open ? "opened" : "closed");
+    tw_logf("menu %s (focus %d, tab %d)", open ? "opened" : "closed", g_menu.focus, g_menu.tab);
 }
 
 // Handles one pad sample. Returns true if the sample should be hidden from the game.
@@ -261,8 +267,10 @@ static bool menu_input(u32 btn) {
     const bool combo = comboHeld && !g_comboHeld;
     g_comboHeld = comboHeld;
     const u64 tnow = now_ms();
+    if (combo && tnow - g_comboMs < 300) tw_logf("open combo ignored (cooldown, %llu ms since last toggle)", (unsigned long long)(tnow - g_comboMs));
     if (combo && tnow - g_comboMs >= 300) {
         g_comboMs = tnow;
+        tw_logf("open combo 0x%x pressed, menu was %s", (unsigned)oc, g_open ? "open" : "closed");
         set_open(!g_open);
         g_swallow = btn;   // ignore everything held right now until it is released
         return true;
@@ -337,8 +345,11 @@ static void process_pad(ScePadData* data, int count) {
         bool hide;
         if (!repeat) {
             if (ts != 0) { g_lastTs = ts; g_lastSampleBtn = btn; }
+            g_padProcessed++;
+            if (g_padProcessed <= 20) tw_logf("pad sample #%u ts=%llu buttons=0x%08x", (unsigned)g_padProcessed, (unsigned long long)ts, (unsigned)btn);
             hide = menu_input(btn);
         } else {
+            g_padDup++;
             hide = g_open && OPT(TW_TAB_CONTROLS, C_BLOCK).v;
         }
         const bool open = g_open;
@@ -351,12 +362,16 @@ static void process_pad(ScePadData* data, int count) {
 
 s32 scePadRead_hook(s32 handle, ScePadData* data, s32 num) {
     s32 ret = scePadReadExt(handle, data, num);
+    g_padCalls++;
+    if (g_padCalls == 1) tw_logf("first scePadRead call: handle=%d ret=%d", handle, ret);
     if (g_ready && data && ret > 0) process_pad(data, ret);
     return ret;
 }
 
 s32 scePadReadState_hook(s32 handle, ScePadData* data) {
     s32 ret = scePadReadStateExt(handle, data);
+    g_padCalls++;
+    if (g_padCalls == 1) tw_logf("first scePadReadState call: handle=%d ret=%d", handle, ret);
     if (g_ready && data && ret == 0) process_pad(data, 1);
     return ret;
 }
@@ -364,17 +379,6 @@ s32 scePadReadState_hook(s32 handle, ScePadData* data) {
 s32 scePadSetVibration_hook(s32 handle, const ScePadVibrationParam* param) {
     if (g_ready && !OPT(TW_TAB_CONTROLS, C_VIBRATION).v) return 0;
     return HOOK_CONTINUE(scePadSetVibration, s32 (*)(s32, const ScePadVibrationParam*), handle, param);
-}
-
-// FPS unlocker: games ask for a frame-rate cap with sceVideoOutSetFlipRate. With the option on, the request is dropped
-// and the game runs uncapped. The plugin loads before the game starts, so it sees the game's startup request.
-// Restart the game after changing the option, because the cap is only set when the game asks for it.
-// The hook is only installed when the option is on at startup, and it never calls the original (same as fliprate_remover).
-// Calling the original through the hook trampoline crashed the game (CE-36329-3) even with the option off.
-static bool g_fpsHooked;
-s32 sceVideoOutSetFlipRate_hook(s32 handle, s32 fliprate) {
-    (void)handle; (void)fliprate;
-    return 0;
 }
 
 // ------------------------------------------------------------------ compositing
@@ -412,12 +416,21 @@ static bool fb_supported(void) {
 // Build the pixel list of the front canvas into the spare list. Runs on the render thread WITHOUT the canvas lock, so
 // the draw thread is never kept waiting while a menu list is being prepared (that waiting was what made the overlay drop
 // out for a moment on every option change).
+// Number of dwords a framebuffer really spans (linear: pitch * height; tiled: whole 128x64 macro tiles).
+static size_t fb_dword_limit(const FbAttr* a) {
+    const u32 pitch = a->pitch ? a->pitch : a->width;
+    if (a->tilingMode == FB_TILING_LINEAR) return (size_t)pitch * a->height;
+    const size_t macroPitch = (pitch + 127) / 128, macroRows = (a->height + 63) / 64;
+    return macroPitch * macroRows * 8192;
+}
+
 static int layer_build(Layer* L, const FbAttr a, int x, int y) {
     const TwCanvas* c = &L->cv[L->front];
     const int W = (int)a.width, H = (int)a.height;
     const int pitch = a.pitch ? (int)a.pitch : W;
     const bool swapRB = (a.format == FB_FMT_A8B8G8R8);
     if (!c->px) return 0;
+    const size_t lim = fb_dword_limit(&a);
     const int need = c->w * c->h;
     if (need > L->ncap) {
         free(L->nidx); free(L->ncol);
@@ -437,7 +450,9 @@ static int layer_build(Layer* L, const FbAttr a, int x, int y) {
             if (xx < 0 || xx >= W) continue;
             u32 r = (s >> 16) & 255, g = (s >> 8) & 255, b = s & 255;
             if (swapRB) { u32 t = r; r = b; b = t; }
-            L->nidx[n] = (u32)fb_index(xx, yy, pitch);
+            const size_t ix = fb_index(xx, yy, pitch);
+            if (ix >= lim) { g_oobSkips++; continue; }
+            L->nidx[n] = (u32)ix;
             L->ncol[n] = 0xFF000000u | (r << 16) | (g << 8) | b;
             n++;
         }
@@ -499,6 +514,7 @@ static void* draw_thread(void* arg) {
         if (!g_ready || !g_fbKnown || !fb_supported()) continue;
         // the two buffers that matter right now (on screen / about to be shown) are stamped first and twice as often
         const s32 cur = g_curIdx, prev = g_prevIdx;
+        g_stamps++;
         const bool curSettled = !g_gnmSeen || (now_ms() - g_curMs) >= 6;
         static int pass;
         cvlock();
@@ -523,6 +539,19 @@ static void* render_thread(void* arg) {
 
     while (g_run) {
         sceKernelUsleep(4000);
+        {
+            static u64 hbMs;
+            const u64 hbNow = now_ms();
+            if (hbNow - hbMs >= 5000) {
+                hbMs = hbNow;
+                tw_logf("status: fps=%.1f menu=%s focus=%d tab=%d sel=%d | pad calls=%u processed=%u dup=%u | flips=%u gnm=%u stamps=%u | oob=%u | fb=%ux%u pitch=%u fmt=0x%x tiling=%d known=%d overlay=%d tiledDraw=%d",
+                        (double)g_fps, g_open ? "open" : "closed", g_menu.focus, g_menu.tab, g_menu.selected,
+                        (unsigned)g_padCalls, (unsigned)g_padProcessed, (unsigned)g_padDup, (unsigned)g_flipCalls,
+                        (unsigned)g_gnmCalls, (unsigned)g_stamps, (unsigned)g_oobSkips,
+                        (unsigned)g_fbAttr.width, (unsigned)g_fbAttr.height, (unsigned)g_fbAttr.pitch,
+                        (unsigned)g_fbAttr.format, (int)g_fbAttr.tilingMode, (int)g_fbKnown, (int)g_overlayOk, (int)g_tiledDraw);
+            }
+        }
         if (!g_ready || !g_fbKnown || !g_fbAttr.width || !g_fbAttr.height) continue;
         const int W = (int)g_fbAttr.width, H = (int)g_fbAttr.height;
         const u64 t = now_ms();
@@ -640,14 +669,18 @@ s32 sceVideoOutRegisterBuffers_hook(s32 handle, s32 startIndex, void* const* add
         g_fbKnown = true;
         g_geo++;
         cvunlock();
-        tw_log("framebuffers: %dx%d pitch=%u fmt=0x%x tiling=%d\n", g_fbAttr.width, g_fbAttr.height, g_fbAttr.pitch,
-               g_fbAttr.format, g_fbAttr.tilingMode);
+        g_fbRegs++;
+        tw_logf("framebuffers registered #%u: start=%d count=%d %ux%u pitch=%u fmt=0x%x tiling=%d", (unsigned)g_fbRegs,
+                startIndex, bufferNum, (unsigned)g_fbAttr.width, (unsigned)g_fbAttr.height, (unsigned)g_fbAttr.pitch,
+                (unsigned)g_fbAttr.format, (int)g_fbAttr.tilingMode);
     }
     return ret;
 }
 
 // Classic path: the game renders, then flips. The buffer is finished, so it is safe to draw on it right here.
 s32 sceVideoOutSubmitFlip_hook(s32 handle, s32 bufferIndex, u32 flipMode, s64 flipArg) {
+    g_flipCalls++;
+    if (g_flipCalls == 1) tw_logf("first sceVideoOutSubmitFlip: index=%d mode=%u", bufferIndex, (unsigned)flipMode);
     if (!g_gnmSeen) {
         fps_tick();
         g_prevIdx = g_curIdx;
@@ -663,6 +696,8 @@ s32 sceVideoOutSubmitFlip_hook(s32 handle, s32 bufferIndex, u32 flipMode, s64 fl
 s32 sceGnmSubmitAndFlipCommandBuffers_hook(u32 count, void* dcbGpuAddrs[], u32* dcbSizesInBytes, void* ccbGpuAddrs[],
                                            u32* ccbSizesInBytes, u32 videoOutHandle, u32 displayBufferIndex, u32 flipMode, s64 flipArg) {
     g_gnmSeen = true;
+    g_gnmCalls++;
+    if (g_gnmCalls == 1) tw_logf("first sceGnmSubmitAndFlipCommandBuffers: index=%u mode=%u", (unsigned)displayBufferIndex, (unsigned)flipMode);
     fps_tick();
     g_prevIdx = g_curIdx;
     g_curIdx = (s32)displayBufferIndex;
@@ -678,12 +713,32 @@ s32 attr_public plugin_load(s32 argc, const char* argv[]) {
     boot_ver();
 
     struct proc_info procInfo;
-    if (sys_sdk_proc_info(&procInfo) == 0) snprintf(g_titleid, sizeof(g_titleid), "%s", procInfo.titleid);
+    tw_init_dirs();
+    g_twT0 = tw_ms();
+    tw_logf("==== Trampware %s session start ====", "2.50");
+    if (sys_sdk_proc_info(&procInfo) == 0) {
+        snprintf(g_titleid, sizeof(g_titleid), "%s", procInfo.titleid);
+        tw_logf("process: pid=%d titleid=%s contentid=%s version=%s name=%s", procInfo.pid, procInfo.titleid,
+                procInfo.contentid, procInfo.version, procInfo.name);
+        tw_logf("process: path=%s base=0x%lx", procInfo.path, (unsigned long)procInfo.base_address);
+    } else {
+        tw_logf("sys_sdk_proc_info failed");
+    }
+    tw_logf("firmware/sdk: sys_sdk_version=0x%x", (unsigned)sys_sdk_version());
+    if (g_titleid[0] && tw_title_disabled(g_titleid)) {
+        g_disabled = true;
+        tw_logf("title %s is listed in disabled_titles.txt: Trampware stays off for this game", g_titleid);
+        return 0;
+    }
 
     tw_menu_init(&g_menu);
     bool hadConfig = load_config();
     sync_look();
     if (!hadConfig) save_config(&g_menu);   // create trampware.ini so the message= line can be edited
+    tw_logf("config: %s (%s)", CONFIG_PATH, hadConfig ? "loaded" : "created with defaults");
+    for (int t = 0; t < TW_TAB_COUNT; t++)
+        for (int i = 0; i < g_menu.count[t]; i++)
+            tw_logf("option %d.%d %s = %d", t, i, g_menu.opts[t][i].label, g_menu.opts[t][i].v);
 
     // libScePad may not be loaded yet when the plugin starts. libSceVideoOut is always loaded by the game
     // (and loading it a second time is unnecessary), so only the pad library is loaded here.
@@ -719,9 +774,7 @@ s32 attr_public plugin_load(s32 argc, const char* argv[]) {
     HOOK32(sceVideoOutSubmitFlip);
     HOOK32(sceGnmSubmitAndFlipCommandBuffers);
 
-    // FPS unlocker: only hooked when it is on at startup (the setting takes effect on the next game launch)
-    if (OPT(TW_TAB_SYSTEM, S_FPS_UNLOCK).v) { HOOK32(sceVideoOutSetFlipRate); g_fpsHooked = true; }
-
+    tw_logf("hooks installed: scePadRead scePadReadState scePadSetVibration sceVideoOutRegisterBuffers sceVideoOutSubmitFlip sceGnmSubmitAndFlipCommandBuffers");
     if (OPT(TW_TAB_SYSTEM, S_NOTIFY).v) {
         char msg[128];
         if (g_loadMsg[0]) snprintf(msg, sizeof(msg), "%s", g_loadMsg);
@@ -736,6 +789,8 @@ s32 attr_public plugin_unload(s32 argc, const char* argv[]) {
     final_printf("[GoldHEN] <%s\\Ver.0x%08x> %s\n", g_pluginName, g_pluginVersion, __func__);
     g_ready = false;
     g_run = false;
+    if (g_disabled) return 0;
+    tw_logf("plugin unload");
     if (g_threadsOn) { scePthreadJoin(g_thRender, NULL); scePthreadJoin(g_thDraw, NULL); g_threadsOn = false; }
     UNHOOK(scePadRead);
     UNHOOK(scePadReadState);
@@ -743,7 +798,6 @@ s32 attr_public plugin_unload(s32 argc, const char* argv[]) {
     UNHOOK(sceVideoOutRegisterBuffers);
     UNHOOK(sceVideoOutSubmitFlip);
     UNHOOK(sceGnmSubmitAndFlipCommandBuffers);
-    if (g_fpsHooked) { UNHOOK(sceVideoOutSetFlipRate); g_fpsHooked = false; }
     save_config(&g_menu);
     for (int i = 0; i < L_COUNT; i++) { tw_canvas_free(&g_layer[i].cv[0]); tw_canvas_free(&g_layer[i].cv[1]); free(g_layer[i].idx); free(g_layer[i].col); free(g_layer[i].nidx); free(g_layer[i].ncol); }
     return 0;
